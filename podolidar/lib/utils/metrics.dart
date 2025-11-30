@@ -5,13 +5,20 @@ class Metrics {
   final double lengthCm;
   final double widthCm;
   final double archHeightCm;
-  Metrics({required this.lengthCm, required this.widthCm, required this.archHeightCm});
+  final double heelAngleDeg;
+  final double archIndex;
+  final double forefootWidthCm;
+  final double archCurvature;
+  final double archForefootRatio;
+  Metrics({required this.lengthCm, required this.widthCm, required this.archHeightCm, required this.heelAngleDeg, required this.archIndex, required this.forefootWidthCm, required this.archCurvature, required this.archForefootRatio});
 }
 
 Metrics? computeMetrics(List<vmath.Vector3> pts) {
   if (pts.isEmpty) return null;
-  final mean = _mean(pts);
-  final cov = _covariance(pts, mean);
+  final footPts = _segmentFoot(pts);
+  if (footPts.isEmpty) return null;
+  final mean = _mean(footPts);
+  final cov = _covariance(footPts, mean);
   final eig = _eigenDecomposition3x3(cov);
   final axes = eig.vectors;
   
@@ -38,7 +45,7 @@ Metrics? computeMetrics(List<vmath.Vector3> pts) {
   double minZ = double.infinity, maxZ = -double.infinity;
 
   final transformed = <vmath.Vector3>[];
-  for (final p in pts) {
+  for (final p in footPts) {
     final q = p - mean;
     final r = R.transposed().transform(q);
     transformed.add(r);
@@ -59,11 +66,22 @@ Metrics? computeMetrics(List<vmath.Vector3> pts) {
     }
   }
   final archM = (aMax.isFinite && aMin.isFinite) ? (aMax - aMin).abs() : heightM;
+  final archIndex = (lengthM > 1e-6) ? (archM / lengthM) : 0.0;
+
+  final heelAngle = _heelAngleDeg(footPts, mean, R, minX, maxX);
+  final forefootWidth = _forefootWidth(transformed, minX, maxX);
+  final archCurv = _archCurvature(transformed, minX, maxX);
+  final archForefootRatio = (forefootWidth > 1e-6) ? (archM / forefootWidth) : 0.0;
 
   return Metrics(
     lengthCm: lengthM * 100.0,
     widthCm: widthM * 100.0,
     archHeightCm: archM * 100.0,
+    heelAngleDeg: heelAngle,
+    archIndex: archIndex,
+    forefootWidthCm: forefootWidth * 100.0,
+    archCurvature: archCurv,
+    archForefootRatio: archForefootRatio,
   );
 }
 
@@ -147,4 +165,186 @@ Eigen3 _eigenDecomposition3x3(vmath.Matrix3 m) {
     v[2][0], v[2][1], v[2][2],
   );
   return Eigen3(values, vectors);
+}
+
+List<vmath.Vector3> _segmentFoot(List<vmath.Vector3> pts) {
+  if (pts.length < 50) return pts;
+  final plane = _adaptivePlane(pts);
+  final n = plane[0];
+  final d = plane[1];
+  final thr = plane[2];
+  final nonPlane = <vmath.Vector3>[];
+  for (final p in pts) {
+    final dist = (n.dot(p) + d).abs();
+    if (dist >= thr) nonPlane.add(p);
+  }
+  if (nonPlane.isEmpty) return pts;
+  final clustered = _dbscan(nonPlane, 0.03, 15);
+  if (clustered.isEmpty) return nonPlane;
+  clustered.sort((a, b) => b.length.compareTo(a.length));
+  final mainCluster = clustered.first;
+  final m = _mean(mainCluster);
+  final filtered = <vmath.Vector3>[];
+  for (final p in mainCluster) {
+    if ((p - m).length < 0.25) filtered.add(p);
+  }
+  return filtered.isNotEmpty ? filtered : mainCluster;
+}
+
+double _heelAngleDeg(List<vmath.Vector3> pts, vmath.Vector3 mean, vmath.Matrix3 R, double minX, double maxX) {
+  final heelPtsWorld = <vmath.Vector3>[];
+  for (final p in pts) {
+    final r = R.transposed().transform(p - mean);
+    if (r.x <= minX + 0.2 * (maxX - minX)) heelPtsWorld.add(p);
+  }
+  if (heelPtsWorld.length < 20) return 0.0;
+  final m = _mean(heelPtsWorld);
+  final C = _covariance(heelPtsWorld, m);
+  final e = _eigenDecomposition3x3(C);
+  int minIdx = 0;
+  if (e.values[1] < e.values[minIdx]) minIdx = 1;
+  if (e.values[2] < e.values[minIdx]) minIdx = 2;
+  final n = vmath.Vector3(e.vectors.entry(0, minIdx), e.vectors.entry(1, minIdx), e.vectors.entry(2, minIdx)).normalized();
+  final up = vmath.Vector3(0,1,0);
+  final cosang = n.dot(up).abs().clamp(0.0, 1.0);
+  final ang = math.acos(cosang) * 180.0 / math.pi;
+  return ang;
+}
+
+List<List<vmath.Vector3>> _dbscan(List<vmath.Vector3> pts, double eps, int minPts) {
+  final n = pts.length;
+  final visited = List<bool>.filled(n, false);
+  final assigned = List<bool>.filled(n, false);
+  final clusters = <List<vmath.Vector3>>[];
+  for (int i = 0; i < n; i++) {
+    if (visited[i]) continue;
+    visited[i] = true;
+    final neighbors = _regionQuery(pts, i, eps);
+    if (neighbors.length < minPts) {
+      continue;
+    }
+    final cluster = <vmath.Vector3>[];
+    cluster.add(pts[i]);
+    assigned[i] = true;
+    int k = 0;
+    while (k < neighbors.length) {
+      final j = neighbors[k];
+      if (!visited[j]) {
+        visited[j] = true;
+        final neighbors2 = _regionQuery(pts, j, eps);
+        if (neighbors2.length >= minPts) {
+          neighbors.addAll(neighbors2);
+        }
+      }
+      if (!assigned[j]) {
+        cluster.add(pts[j]);
+        assigned[j] = true;
+      }
+      k++;
+    }
+    clusters.add(cluster);
+  }
+  return clusters;
+}
+
+List<int> _regionQuery(List<vmath.Vector3> pts, int idx, double eps) {
+  final p = pts[idx];
+  final res = <int>[];
+  final e2 = eps * eps;
+  for (int i = 0; i < pts.length; i++) {
+    if (i == idx) continue;
+    final d2 = (pts[i] - p).length2;
+    if (d2 <= e2) res.add(i);
+  }
+  return res;
+}
+
+List<double> _profileZ(List<vmath.Vector3> transformed, double minX, double maxX, int bins) {
+  final step = (maxX - minX) / bins;
+  final zvals = List<List<double>>.generate(bins, (_) => <double>[]);
+  for (final r in transformed) {
+    final bi = ((r.x - minX) / step).floor();
+    if (bi >= 0 && bi < bins) zvals[bi].add(r.z);
+  }
+  final profile = List<double>.filled(bins, 0.0);
+  for (int i = 0; i < bins; i++) {
+    if (zvals[i].isEmpty) { profile[i] = 0.0; continue; }
+    zvals[i].sort();
+    final m = zvals[i].length;
+    profile[i] = zvals[i][m ~/ 2];
+  }
+  return profile;
+}
+
+double _archCurvature(List<vmath.Vector3> transformed, double minX, double maxX) {
+  final bins = 32;
+  var z = _profileZ(transformed, minX, maxX, bins);
+  z = _savgol5(z);
+  final dx = (maxX - minX) / bins;
+  double maxK = 0.0;
+  for (int i = 1; i < bins - 1; i++) {
+    final d2 = (z[i+1] - 2*z[i] + z[i-1]) / (dx*dx);
+    final k = d2.abs();
+    if (k > maxK) maxK = k;
+  }
+  return maxK * 100.0;
+}
+
+List<double> _savgol5(List<double> x) {
+  if (x.length < 5) return x;
+  final y = List<double>.filled(x.length, 0.0);
+  for (int i = 0; i < x.length; i++) {
+    double s = 0.0;
+    for (int k = -2; k <= 2; k++) {
+      int j = i + k;
+      if (j < 0) j = 0;
+      if (j >= x.length) j = x.length - 1;
+      final c = (k == -2 || k == 2) ? -3.0 : (k == -1 || k == 1) ? 12.0 : 17.0;
+      s += c * x[j];
+    }
+    y[i] = s / 35.0;
+  }
+  return y;
+}
+
+double _forefootWidth(List<vmath.Vector3> transformed, double minX, double maxX) {
+  final frontStart = minX + 0.8 * (maxX - minX);
+  double minY = double.infinity, maxY = -double.infinity;
+  for (final r in transformed) {
+    if (r.x >= frontStart) {
+      if (r.y < minY) minY = r.y;
+      if (r.y > maxY) maxY = r.y;
+    }
+  }
+  if (!minY.isFinite || !maxY.isFinite) return 0.0;
+  return (maxY - minY).abs();
+}
+
+List<dynamic> _adaptivePlane(List<vmath.Vector3> pts) {
+  final rnd = math.Random(12345);
+  vmath.Vector3? bestN;
+  double bestD = 0.0;
+  double bestScore = double.infinity;
+  for (int it = 0; it < 100; it++) {
+    final p1 = pts[rnd.nextInt(pts.length)];
+    final p2 = pts[rnd.nextInt(pts.length)];
+    final p3 = pts[rnd.nextInt(pts.length)];
+    final n = (p2 - p1).cross(p3 - p1).normalized();
+    if (n.length < 1e-6) continue;
+    final d = -n.dot(p1);
+    double sum = 0.0;
+    for (final p in pts) { sum += (n.dot(p) + d).abs(); }
+    final score = sum / pts.length;
+    if (score < bestScore) { bestScore = score; bestN = n; bestD = d; }
+  }
+  if (bestN == null) return [vmath.Vector3(0,1,0), 0.0, 0.01];
+  final res = <double>[];
+  for (final p in pts) { res.add((bestN.dot(p) + bestD).abs()); }
+  res.sort();
+  final med = res[res.length ~/ 2];
+  double mad = 0.0;
+  for (final r in res) { mad += (r - med).abs(); }
+  mad /= res.length;
+  final thr = math.max(0.008, 3.0 * mad);
+  return [bestN, bestD, thr];
 }
