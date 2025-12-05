@@ -567,3 +567,117 @@ Future<Uint8List> generatePdfReport(Metrics m) async {
   );
   return await pdf.save();
 }
+
+String generateHeightmapObj(List<vmath.Vector3> pts) {
+  if (pts.isEmpty) return '';
+  final footPts = _segmentFoot(pts);
+  if (footPts.isEmpty) return '';
+  final mean = _mean(footPts);
+  final cov = _covariance(footPts, mean);
+  final eig = _eigenDecomposition3x3(cov);
+  final axes = eig.vectors;
+  final indices = [0,1,2];
+  indices.sort((a,b)=>eig.values[b].compareTo(eig.values[a]));
+  final c0 = vmath.Vector3(axes.entry(0, indices[0]), axes.entry(1, indices[0]), axes.entry(2, indices[0]));
+  final c1 = vmath.Vector3(axes.entry(0, indices[1]), axes.entry(1, indices[1]), axes.entry(2, indices[1]));
+  final c2 = vmath.Vector3(axes.entry(0, indices[2]), axes.entry(1, indices[2]), axes.entry(2, indices[2]));
+  final R = vmath.Matrix3.columns(c0, c1, c2);
+  double minX = double.infinity, maxX = -double.infinity;
+  double minY = double.infinity, maxY = -double.infinity;
+  for (final p in footPts) {
+    final r = R.transposed().transform(p - mean);
+    if (r.x < minX) minX = r.x; if (r.x > maxX) maxX = r.x;
+    if (r.y < minY) minY = r.y; if (r.y > maxY) maxY = r.y;
+  }
+  final nx = 64;
+  final ny = 32;
+  final dx = (maxX - minX) / nx;
+  final dy = (maxY - minY) / ny;
+  final zlists = List.generate(nx*ny, (_) => <double>[]);
+  for (final p in footPts) {
+    final r = R.transposed().transform(p - mean);
+    int ix = ((r.x - minX) / dx).floor();
+    int iy = ((r.y - minY) / dy).floor();
+    if (ix < 0) ix = 0; if (ix >= nx) ix = nx-1;
+    if (iy < 0) iy = 0; if (iy >= ny) iy = ny-1;
+    zlists[iy*nx + ix].add(r.z);
+  }
+  final zgrid = List.filled(nx*ny, 0.0);
+  for (int i = 0; i < nx*ny; i++) {
+    final lst = zlists[i];
+    if (lst.isEmpty) { zgrid[i] = 0.0; } else { lst.sort(); zgrid[i] = lst[lst.length~/2]; }
+  }
+  final zsm = _bilateralGrid(zgrid, nx, ny, 1.0, 0.01);
+  final vbuf = StringBuffer();
+  final nbuf = StringBuffer();
+  for (int iy = 0; iy < ny; iy++) {
+    for (int ix = 0; ix < nx; ix++) {
+      final x = minX + ix * dx;
+      final y = minY + iy * dy;
+      final z = zsm[iy*nx + ix];
+      final rw = vmath.Vector3(x, y, z);
+      final pw = mean + R.transform(rw);
+      vbuf.writeln('v ${pw.x} ${pw.y} ${pw.z}');
+    }
+  }
+  for (int iy = 0; iy < ny; iy++) {
+    for (int ix = 0; ix < nx; ix++) {
+      final zl = zsm[iy*nx + (ix>0?ix-1:ix)];
+      final zr = zsm[iy*nx + (ix<nx-1?ix+1:ix)];
+      final zu = zsm[(iy>0?iy-1:iy)*nx + ix];
+      final zd = zsm[(iy<ny-1?iy+1:iy)*nx + ix];
+      final ddx = (zr - zl) / (2*dx);
+      final ddy = (zd - zu) / (2*dy);
+      var nf = vmath.Vector3(-ddx, -ddy, 1.0).normalized();
+      final nw = R.transform(nf).normalized();
+      nbuf.writeln('vn ${nw.x} ${nw.y} ${nw.z}');
+    }
+  }
+  final fbuf = StringBuffer();
+  for (int iy = 0; iy < ny-1; iy++) {
+    for (int ix = 0; ix < nx-1; ix++) {
+      final i0 = iy*nx + ix + 1;
+      final i1 = iy*nx + ix + 2;
+      final i2 = (iy+1)*nx + ix + 2;
+      final i3 = (iy+1)*nx + ix + 1;
+      fbuf.writeln('f $i0//$i0 $i1//$i1 $i2//$i2');
+      fbuf.writeln('f $i0//$i0 $i2//$i2 $i3//$i3');
+    }
+  }
+  final sb = StringBuffer();
+  sb.writeln('# foot mesh');
+  sb.writeln(vbuf.toString());
+  sb.writeln(nbuf.toString());
+  sb.writeln(fbuf.toString());
+  return sb.toString();
+}
+
+List<double> _bilateralGrid(List<double> z, int nx, int ny, double sigmaS, double sigmaR) {
+  final out = List<double>.from(z);
+  final r = 1;
+  for (int iy = 0; iy < ny; iy++) {
+    for (int ix = 0; ix < nx; ix++) {
+      final i0 = iy*nx + ix;
+      double wsum = 0.0;
+      double zsum = 0.0;
+      final zc = z[i0];
+      for (int dy = -r; dy <= r; dy++) {
+        for (int dxp = -r; dxp <= r; dxp++) {
+          final jx = ix + dxp;
+          final jy = iy + dy;
+          if (jx < 0 || jx >= nx || jy < 0 || jy >= ny) continue;
+          final j = jy*nx + jx;
+          final ds2 = (dxp*dxp + dy*dy).toDouble();
+          final dr = (z[j] - zc).abs();
+          final ws = math.exp(-ds2/(2*sigmaS*sigmaS));
+          final wr = math.exp(-(dr*dr)/(2*sigmaR*sigmaR));
+          final w = ws * wr;
+          wsum += w;
+          zsum += w * z[j];
+        }
+      }
+      if (wsum > 1e-9) out[i0] = zsum / wsum;
+    }
+  }
+  return out;
+}

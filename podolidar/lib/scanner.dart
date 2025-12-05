@@ -24,6 +24,10 @@ class _ScannerPageState extends State<ScannerPage> {
   List<vmath.Vector3> _points = const [];
   Metrics? _metrics;
   bool _scanning = false;
+  bool _accumulate = false;
+  final Map<String, vmath.Vector3> _accum = {};
+  final Map<String, int> _accumC = {};
+  final double _cell = 0.005;
 
   Future<void> _start() async {
     await _method.invokeMethod('startScan');
@@ -51,10 +55,37 @@ class _ScannerPageState extends State<ScannerPage> {
         final z = bd.getFloat32(base + 8, Endian.little);
         pts.add(vmath.Vector3(x, y, z));
       }
-      setState(() {
-        _points = pts;
-        _metrics = computeMetrics(pts);
-      });
+      if (_accumulate) {
+        for (final p in pts) {
+          final ix = (p.x / _cell).floor();
+          final iy = (p.y / _cell).floor();
+          final iz = (p.z / _cell).floor();
+          final key = '$ix:$iy:$iz';
+          final prev = _accum[key];
+          if (prev == null) {
+            _accum[key] = p;
+            _accumC[key] = 1;
+          } else {
+            final c = (_accumC[key] ?? 1) + 1;
+            _accumC[key] = c;
+            _accum[key] = vmath.Vector3(
+              (prev.x * (c - 1) + p.x) / c,
+              (prev.y * (c - 1) + p.y) / c,
+              (prev.z * (c - 1) + p.z) / c,
+            );
+          }
+        }
+        final agg = _accum.values.toList(growable: false);
+        setState(() {
+          _points = agg;
+          _metrics = computeMetrics(agg);
+        });
+      } else {
+        setState(() {
+          _points = pts;
+          _metrics = computeMetrics(pts);
+        });
+      }
     }
   }
 
@@ -75,12 +106,24 @@ class _ScannerPageState extends State<ScannerPage> {
           },
         ),
         IconButton(
+          icon: Icon(_accumulate ? Icons.layers : Icons.layers_clear),
+          onPressed: () { setState(() { _accumulate = !_accumulate; }); },
+        ),
+        IconButton(
+          icon: const Icon(Icons.delete_outline),
+          onPressed: () { setState(() { _accum.clear(); _accumC.clear(); _points = const []; _metrics = null; }); },
+        ),
+        IconButton(
           icon: const Icon(Icons.save_alt),
           onPressed: _exportJson,
         ),
         IconButton(
           icon: const Icon(Icons.picture_as_pdf),
           onPressed: _exportPdf,
+        ),
+        IconButton(
+          icon: const Icon(Icons.category),
+          onPressed: _exportObj,
         ),
       ]),
       body: Column(
@@ -177,5 +220,23 @@ class _ScannerPageState extends State<ScannerPage> {
     await file.writeAsBytes(bytes, flush: true);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('PDF enregistré: ${file.path}')));
+  }
+
+  Future<void> _exportObj() async {
+    if (_points.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aucun nuage à exporter')));
+      return;
+    }
+    final obj = generateHeightmapObj(_points);
+    if (obj.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Maillage indisponible')));
+      return;
+    }
+    final dir = await getApplicationDocumentsDirectory();
+    final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
+    final file = File('${dir.path}/mesh_$ts.obj');
+    await file.writeAsString(obj);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('OBJ enregistré: ${file.path}')));
   }
 }
