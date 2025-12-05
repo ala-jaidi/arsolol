@@ -1,5 +1,8 @@
 import 'package:vector_math/vector_math_64.dart' as vmath;
 import 'dart:math' as math;
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:pdf/widgets.dart' as pw;
 
 class Metrics {
   final double lengthCm;
@@ -10,7 +13,19 @@ class Metrics {
   final double forefootWidthCm;
   final double archCurvature;
   final double archForefootRatio;
-  Metrics({required this.lengthCm, required this.widthCm, required this.archHeightCm, required this.heelAngleDeg, required this.archIndex, required this.forefootWidthCm, required this.archCurvature, required this.archForefootRatio});
+  final double w25Cm;
+  final double w50Cm;
+  final double w75Cm;
+  final double heelWidthCm;
+  final double csiPercent;
+  final double staheliRatio;
+  final double clarkeAngleDeg;
+  final double volumeCm3;
+  final vmath.Vector3 m1Head;
+  final vmath.Vector3 m5Head;
+  final vmath.Vector3 navicular;
+  final vmath.Vector3 heelCenter;
+  Metrics({required this.lengthCm, required this.widthCm, required this.archHeightCm, required this.heelAngleDeg, required this.archIndex, required this.forefootWidthCm, required this.archCurvature, required this.archForefootRatio, required this.w25Cm, required this.w50Cm, required this.w75Cm, required this.heelWidthCm, required this.csiPercent, required this.staheliRatio, required this.clarkeAngleDeg, required this.volumeCm3, required this.m1Head, required this.m5Head, required this.navicular, required this.heelCenter});
 }
 
 Metrics? computeMetrics(List<vmath.Vector3> pts) {
@@ -72,6 +87,15 @@ Metrics? computeMetrics(List<vmath.Vector3> pts) {
   final forefootWidth = _forefootWidth(transformed, minX, maxX);
   final archCurv = _archCurvature(transformed, minX, maxX);
   final archForefootRatio = (forefootWidth > 1e-6) ? (archM / forefootWidth) : 0.0;
+  final w25 = _widthAt(transformed, minX, maxX, 0.25);
+  final w50 = _widthAt(transformed, minX, maxX, 0.50);
+  final w75 = _widthAt(transformed, minX, maxX, 0.75);
+  final heelW = _heelWidth(transformed, minX, maxX);
+  final csi = (forefootWidth > 1e-6) ? (w50 / forefootWidth * 100.0) : 0.0;
+  final staheli = (heelW > 1e-6) ? (w50 / heelW) : 0.0;
+  final clarke = _clarkeAngle(transformed, minX, maxX);
+  final vol = _voxelVolume(transformed, minX, maxX);
+  final lm = _detectLandmarks(footPts, mean, R, minX, maxX, minY, maxY);
 
   return Metrics(
     lengthCm: lengthM * 100.0,
@@ -82,6 +106,18 @@ Metrics? computeMetrics(List<vmath.Vector3> pts) {
     forefootWidthCm: forefootWidth * 100.0,
     archCurvature: archCurv,
     archForefootRatio: archForefootRatio,
+    w25Cm: w25 * 100.0,
+    w50Cm: w50 * 100.0,
+    w75Cm: w75 * 100.0,
+    heelWidthCm: heelW * 100.0,
+    csiPercent: csi,
+    staheliRatio: staheli,
+    clarkeAngleDeg: clarke,
+    volumeCm3: vol,
+    m1Head: lm.m1,
+    m5Head: lm.m5,
+    navicular: lm.nav,
+    heelCenter: lm.heel,
   );
 }
 
@@ -127,7 +163,6 @@ Eigen3 _eigenDecomposition3x3(vmath.Matrix3 m) {
     [0.0, 0.0, 1.0],
   ];
   for (int iter = 0; iter < 24; iter++) {
-    // Find largest off-diagonal
     int p = 0, q = 1;
     double max = (a[0][1]).abs();
     void updateMax(int i,int j){ final val=(a[i][j]).abs(); if(val>max){max=val;p=i;q=j;} }
@@ -185,8 +220,15 @@ List<vmath.Vector3> _segmentFoot(List<vmath.Vector3> pts) {
   final mainCluster = clustered.first;
   final m = _mean(mainCluster);
   final filtered = <vmath.Vector3>[];
+  final dists = <double>[];
+  for (final p in mainCluster) { dists.add((p - m).length); }
+  dists.sort();
+  final med = dists[dists.length ~/ 2];
+  double mad = 0.0; for (final d in dists) { mad += (d - med).abs(); }
+  mad /= dists.length;
+  final thrRad = math.max(0.12, med + 3.0 * mad);
   for (final p in mainCluster) {
-    if ((p - m).length < 0.25) filtered.add(p);
+    if ((p - m).length <= thrRad) filtered.add(p);
   }
   return filtered.isNotEmpty ? filtered : mainCluster;
 }
@@ -347,4 +389,181 @@ List<dynamic> _adaptivePlane(List<vmath.Vector3> pts) {
   mad /= res.length;
   final thr = math.max(0.008, 3.0 * mad);
   return [bestN, bestD, thr];
+}
+double _widthAt(List<vmath.Vector3> transformed, double minX, double maxX, double t) {
+  final x0 = minX + t * (maxX - minX);
+  final w = 0.05 * (maxX - minX);
+  double minY = double.infinity, maxY = -double.infinity;
+  for (final r in transformed) {
+    if ((r.x - x0).abs() <= w) {
+      if (r.y < minY) minY = r.y;
+      if (r.y > maxY) maxY = r.y;
+    }
+  }
+  if (!minY.isFinite || !maxY.isFinite) return 0.0;
+  return (maxY - minY).abs();
+}
+
+double _heelWidth(List<vmath.Vector3> transformed, double minX, double maxX) {
+  final rearEnd = minX + 0.2 * (maxX - minX);
+  double minY = double.infinity, maxY = -double.infinity;
+  for (final r in transformed) {
+    if (r.x <= rearEnd) {
+      if (r.y < minY) minY = r.y;
+      if (r.y > maxY) maxY = r.y;
+    }
+  }
+  if (!minY.isFinite || !maxY.isFinite) return 0.0;
+  return (maxY - minY).abs();
+}
+
+double _clarkeAngle(List<vmath.Vector3> transformed, double minX, double maxX) {
+  final bins = 32;
+  var z = _profileZ(transformed, minX, maxX, bins);
+  z = _savgol5(z);
+  final dx = (maxX - minX) / bins;
+  int start = (bins * 0.25).floor();
+  int end = (bins * 0.75).floor();
+  int idx = start;
+  double minVal = double.infinity;
+  for (int i = start; i < end; i++) { if (z[i] < minVal) { minVal = z[i]; idx = i; } }
+  double slope = 0.0;
+  if (idx > 0 && idx < bins - 1) { slope = (z[idx+1] - z[idx-1]) / (2*dx); }
+  return math.atan(slope.abs()) * 180.0 / math.pi;
+}
+
+double _voxelVolume(List<vmath.Vector3> transformed, double minX, double maxX) {
+  double minY = double.infinity, maxY = -double.infinity;
+  for (final r in transformed) { if (r.y < minY) minY = r.y; if (r.y > maxY) maxY = r.y; }
+  if (!minY.isFinite || !maxY.isFinite) return 0.0;
+  final s = 0.01;
+  final map = <String, List<double>>{};
+  for (final r in transformed) {
+    final xi = ((r.x - minX) / s).floor();
+    final yi = ((r.y - minY) / s).floor();
+    final key = "$xi:$yi";
+    final v = map[key];
+    if (v == null) { map[key] = [r.z, r.z, 1]; } else { if (r.z < v[0]) v[0] = r.z; if (r.z > v[1]) v[1] = r.z; v[2] += 1; }
+  }
+  double vol = 0.0;
+  for (final e in map.entries) {
+    final v = e.value;
+    if (v[2] >= 4) { final h = (v[1] - v[0]).abs(); vol += h * s * s; }
+  }
+  return vol * 1e6;
+}
+class Landmarks {
+  final vmath.Vector3 m1;
+  final vmath.Vector3 m5;
+  final vmath.Vector3 nav;
+  final vmath.Vector3 heel;
+  Landmarks(this.m1, this.m5, this.nav, this.heel);
+}
+
+Landmarks _detectLandmarks(List<vmath.Vector3> ptsWorld, vmath.Vector3 mean, vmath.Matrix3 R, double minX, double maxX, double minY, double maxY) {
+  final transformed = <vmath.Vector3>[];
+  for (final p in ptsWorld) {
+    transformed.add(R.transposed().transform(p - mean));
+  }
+  final frontStart = minX + 0.85 * (maxX - minX);
+  final midStart = minX + 0.4 * (maxX - minX);
+  final midEnd = minX + 0.6 * (maxX - minX);
+  final rearEnd = minX + 0.15 * (maxX - minX);
+  final yMed = (minY + maxY) * 0.5;
+
+  vmath.Vector3? m1r;
+  vmath.Vector3? m5r;
+  double m1z = -double.infinity;
+  double m5z = -double.infinity;
+  for (int i = 0; i < transformed.length; i++) {
+    final r = transformed[i];
+    if (r.x >= frontStart) {
+      if (r.y <= yMed && r.z > m1z) { m1z = r.z; m1r = r; }
+      if (r.y >= yMed && r.z > m5z) { m5z = r.z; m5r = r; }
+    }
+  }
+  vmath.Vector3? navr;
+  double navz = -double.infinity;
+  for (final r in transformed) {
+    if (r.x >= midStart && r.x <= midEnd && r.y <= yMed) {
+      if (r.z > navz) { navz = r.z; navr = r; }
+    }
+  }
+  vmath.Vector3 heelt = vmath.Vector3.zero();
+  int heelCount = 0;
+  for (final r in transformed) {
+    if (r.x <= rearEnd) { heelt += r; heelCount++; }
+  }
+  if (heelCount > 0) heelt.scale(1.0 / heelCount);
+
+  final m1 = mean + R.transform(m1r ?? vmath.Vector3(frontStart, minY, 0));
+  final m5 = mean + R.transform(m5r ?? vmath.Vector3(frontStart, maxY, 0));
+  final nav = mean + R.transform(navr ?? vmath.Vector3((midStart+midEnd)*0.5, yMed, 0));
+  final heel = mean + R.transform(heelt);
+  return Landmarks(m1, m5, nav, heel);
+}
+
+String metricsToJson(Metrics m) {
+  final map = {
+    'length_cm': m.lengthCm,
+    'width_cm': m.widthCm,
+    'arch_height_cm': m.archHeightCm,
+    'heel_angle_deg': m.heelAngleDeg,
+    'arch_index_percent': m.archIndex * 100.0,
+    'forefoot_width_cm': m.forefootWidthCm,
+    'arch_curvature_1_per_cm': m.archCurvature,
+    'arch_forefoot_ratio': m.archForefootRatio,
+    'width_25_cm': m.w25Cm,
+    'width_50_cm': m.w50Cm,
+    'width_75_cm': m.w75Cm,
+    'heel_width_cm': m.heelWidthCm,
+    'csi_percent': m.csiPercent,
+    'staheli_ratio': m.staheliRatio,
+    'clarke_angle_deg': m.clarkeAngleDeg,
+    'volume_cm3': m.volumeCm3,
+    'landmarks': {
+      'm1': [m.m1Head.x, m.m1Head.y, m.m1Head.z],
+      'm5': [m.m5Head.x, m.m5Head.y, m.m5Head.z],
+      'navicular': [m.navicular.x, m.navicular.y, m.navicular.z],
+      'heel_center': [m.heelCenter.x, m.heelCenter.y, m.heelCenter.z],
+    }
+  };
+  return jsonEncode(map);
+}
+
+Future<Uint8List> generatePdfReport(Metrics m) async {
+  final pdf = pw.Document();
+  pdf.addPage(
+    pw.Page(
+      build: (context) => pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Text('Rapport Podologie - Scan LiDAR', style: pw.TextStyle(fontSize: 18)),
+          pw.SizedBox(height: 12),
+          pw.Text('Longueur: ${m.lengthCm.toStringAsFixed(1)} cm'),
+          pw.Text('Largeur: ${m.widthCm.toStringAsFixed(1)} cm'),
+          pw.Text('Hauteur voûte: ${m.archHeightCm.toStringAsFixed(1)} cm'),
+          pw.Text('Angle talon: ${m.heelAngleDeg.toStringAsFixed(1)} °'),
+          pw.Text('Indice voûte: ${(m.archIndex*100).toStringAsFixed(1)} %'),
+          pw.Text('Largeur avant-pied: ${m.forefootWidthCm.toStringAsFixed(1)} cm'),
+          pw.Text('Courbure voûte: ${m.archCurvature.toStringAsFixed(3)} 1/cm'),
+          pw.Text('Ratio voûte/avant-pied: ${m.archForefootRatio.toStringAsFixed(3)}'),
+          pw.SizedBox(height: 6),
+          pw.Text('Largeurs 25/50/75%: ${m.w25Cm.toStringAsFixed(1)} / ${m.w50Cm.toStringAsFixed(1)} / ${m.w75Cm.toStringAsFixed(1)} cm'),
+          pw.Text('Largeur talon: ${m.heelWidthCm.toStringAsFixed(1)} cm'),
+          pw.Text('Chippaux-Smirak: ${m.csiPercent.toStringAsFixed(1)} %'),
+          pw.Text('Staheli ratio: ${m.staheliRatio.toStringAsFixed(3)}'),
+          pw.Text('Clarke angle: ${m.clarkeAngleDeg.toStringAsFixed(1)} °'),
+          pw.Text('Volume: ${m.volumeCm3.toStringAsFixed(1)} cm³'),
+          pw.SizedBox(height: 12),
+          pw.Text('Landmarks (x,y,z):'),
+          pw.Text('M1: ${m.m1Head.x.toStringAsFixed(2)}, ${m.m1Head.y.toStringAsFixed(2)}, ${m.m1Head.z.toStringAsFixed(2)}'),
+          pw.Text('M5: ${m.m5Head.x.toStringAsFixed(2)}, ${m.m5Head.y.toStringAsFixed(2)}, ${m.m5Head.z.toStringAsFixed(2)}'),
+          pw.Text('Naviculaire: ${m.navicular.x.toStringAsFixed(2)}, ${m.navicular.y.toStringAsFixed(2)}, ${m.navicular.z.toStringAsFixed(2)}'),
+          pw.Text('Talon: ${m.heelCenter.x.toStringAsFixed(2)}, ${m.heelCenter.y.toStringAsFixed(2)}, ${m.heelCenter.z.toStringAsFixed(2)}'),
+        ],
+      ),
+    ),
+  );
+  return await pdf.save();
 }

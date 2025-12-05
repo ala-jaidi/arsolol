@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:vector_math/vector_math_64.dart' as vmath;
+import 'package:path_provider/path_provider.dart';
 import 'point_cloud_view.dart';
 import 'utils/metrics.dart';
 import 'camera_fallback.dart';
@@ -71,7 +73,15 @@ class _ScannerPageState extends State<ScannerPage> {
           onPressed: () {
             Navigator.of(context).push(MaterialPageRoute(builder: (_) => const CameraFallbackPage()));
           },
-        )
+        ),
+        IconButton(
+          icon: const Icon(Icons.save_alt),
+          onPressed: _exportJson,
+        ),
+        IconButton(
+          icon: const Icon(Icons.picture_as_pdf),
+          onPressed: _exportPdf,
+        ),
       ]),
       body: Column(
         children: [
@@ -90,6 +100,14 @@ class _ScannerPageState extends State<ScannerPage> {
                 _metricTile('Largeur avant-pied', _metrics?.forefootWidthCm),
                 _metricTile('Courbure voûte', _metrics?.archCurvature),
                 _metricTile('Ratio voûte/avant-pied', _metrics?.archForefootRatio),
+                _metricTile('Largeur 25%', _metrics?.w25Cm),
+                _metricTile('Largeur 50%', _metrics?.w50Cm),
+                _metricTile('Largeur 75%', _metrics?.w75Cm),
+                _metricTile('Largeur talon', _metrics?.heelWidthCm),
+                _metricTile('Chippaux-Smirak %', _metrics?.csiPercent),
+                _metricTile('Staheli ratio', _metrics?.staheliRatio),
+                _metricTile('Clarke angle', _metrics?.clarkeAngleDeg),
+                _metricTile('Volume cm³', _metrics?.volumeCm3),
               ],
             ),
           ),
@@ -131,5 +149,33 @@ class _ScannerPageState extends State<ScannerPage> {
         Text(text),
       ],
     );
+  }
+
+  Future<void> _exportJson() async {
+    if (_metrics == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aucune métrique à exporter')));
+      return;
+    }
+    final jsonStr = metricsToJson(_metrics!);
+    final dir = await getApplicationDocumentsDirectory();
+    final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
+    final file = File('${dir.path}/scan_$ts.json');
+    await file.writeAsString(jsonStr);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('JSON enregistré: ${file.path}')));
+  }
+
+  Future<void> _exportPdf() async {
+    if (_metrics == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aucune métrique à exporter')));
+      return;
+    }
+    final bytes = await generatePdfReport(_metrics!);
+    final dir = await getApplicationDocumentsDirectory();
+    final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
+    final file = File('${dir.path}/scan_$ts.pdf');
+    await file.writeAsBytes(bytes, flush: true);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('PDF enregistré: ${file.path}')));
   }
 }
