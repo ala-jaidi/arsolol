@@ -35,6 +35,7 @@ class _ScannerPageState extends State<ScannerPage> {
     'FL': true, 'BFL': true, 'OBFL': true, 'FBH': true, 'FBD': true, 'HB': true, 'IH': true,
   };
   String _quality = 'performance';
+  bool _ultra = false;
   final Map<String, vmath.Vector3> _accum = {};
   final Map<String, int> _accumC = {};
   final double _cell = 0.005;
@@ -43,6 +44,11 @@ class _ScannerPageState extends State<ScannerPage> {
   final int _targetVox = 3000;
   double _coverage = 0.0;
   SevenDims? _dimsPrev;
+  String _lastGuide = '';
+  double _fpsAvg = 0.0;
+  int _lastEventMs = 0;
+  int _startMs = 0;
+  bool _calibrated = false;
 
   Future<void> _start() async {
     await _method.invokeMethod('startScan');
@@ -50,7 +56,7 @@ class _ScannerPageState extends State<ScannerPage> {
     _sub = _events.receiveBroadcastStream().listen(_onEvent);
     _videoSub?.cancel();
     _videoSub = _eventsVideo.receiveBroadcastStream().listen(_onVideo);
-    setState(() => _scanning = true);
+    setState(() { _scanning = true; _fpsAvg = 0; _lastEventMs = 0; _startMs = DateTime.now().millisecondsSinceEpoch; _calibrated = false; });
   }
 
   Future<void> _stop() async {
@@ -64,6 +70,15 @@ class _ScannerPageState extends State<ScannerPage> {
 
   void _onEvent(dynamic data) {
     if (data is Uint8List) {
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if (_lastEventMs != 0) {
+        final dt = nowMs - _lastEventMs;
+        if (dt > 0 && dt < 1000) {
+          final fps = 1000.0 / dt;
+          _fpsAvg = _fpsAvg == 0 ? fps : (_fpsAvg * 0.8 + fps * 0.2);
+        }
+      }
+      _lastEventMs = nowMs;
       final bd = ByteData.sublistView(data);
       if (bd.lengthInBytes < 4) return;
       int count = bd.getInt32(0, Endian.little);
@@ -103,6 +118,19 @@ class _ScannerPageState extends State<ScannerPage> {
         final agg = _accum.values.toList(growable: false);
         final now = DateTime.now().millisecondsSinceEpoch;
         _coverage = (_accum.length / _targetVox).clamp(0.0, 1.0);
+        final guide = _guideText();
+        if (_scanning && guide != _lastGuide) {
+          _lastGuide = guide;
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(guide == 'OK' ? 'Couverture OK' : 'Continuez: $guide')));
+          }
+        }
+        if (!_calibrated && _scanning && (nowMs - _startMs) > 1500 && _fpsAvg > 0) {
+          final tunedFps = _fpsAvg.clamp(18.0, 28.0);
+          final defaults = _qualityDefaults(_quality);
+          _method.invokeMethod('setQuality', {'targetFps': tunedFps, 'maxPoints': defaults.$2});
+          _calibrated = true;
+        }
         if (now - _lastMetricsMs >= _metricsIntervalMs) {
           try {
             final m = computeMetrics(agg);
@@ -220,7 +248,7 @@ class _ScannerPageState extends State<ScannerPage> {
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(12)),
             child: Text(
-              '${_accumulate ? 'Accumulation' : 'Instantané'} · ${_points.length} pts',
+              '${_accumulate ? 'Accumulation' : 'Instantané'} · ${_points.length} pts · ${_fpsAvg.toStringAsFixed(0)} FPS',
               style: const TextStyle(color: Colors.white),
             ),
           ),
@@ -229,11 +257,30 @@ class _ScannerPageState extends State<ScannerPage> {
           top: 8,
           left: 8,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(12)),
-            child: Text(
-              'Couverture ${(100*_coverage).toStringAsFixed(0)}% · ${_guideText()}',
-              style: const TextStyle(color: Colors.white),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Couverture ${(100*_coverage).toStringAsFixed(0)}% · ${_guideText()}',
+                  style: const TextStyle(color: Colors.white),
+                ),
+                const SizedBox(height: 6),
+                SizedBox(
+                  width: 160,
+                  height: 6,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: _coverage,
+                      backgroundColor: Colors.white24,
+                      color: Colors.lightGreenAccent,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -253,7 +300,7 @@ class _ScannerPageState extends State<ScannerPage> {
               const SizedBox(width: 12),
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: _scanning ? _stop : null,
+                  onPressed: (_scanning && _coverage >= 0.9) ? _onStopPressed : null,
                   icon: const Icon(Icons.stop),
                   label: const Text('Arrêter'),
                 ),
@@ -321,6 +368,10 @@ class _ScannerPageState extends State<ScannerPage> {
   }
 
   Future<void> _exportJson() async {
+    if (_coverage < 0.9) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Couverture ${(100*_coverage).toStringAsFixed(0)}% insuffisante · Continuez: ${_guideText()}')));
+      return;
+    }
     if (_metrics == null) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aucune métrique à exporter')));
       return;
@@ -337,6 +388,10 @@ class _ScannerPageState extends State<ScannerPage> {
   }
 
   Future<void> _exportPdf() async {
+    if (_coverage < 0.9) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Couverture ${(100*_coverage).toStringAsFixed(0)}% insuffisante · Continuez: ${_guideText()}')));
+      return;
+    }
     if (_metrics == null) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aucune métrique à exporter')));
       return;
@@ -351,6 +406,10 @@ class _ScannerPageState extends State<ScannerPage> {
   }
 
   Future<void> _exportObj() async {
+    if (_coverage < 0.9) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Couverture ${(100*_coverage).toStringAsFixed(0)}% insuffisante · Continuez: ${_guideText()}')));
+      return;
+    }
     if (_points.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aucun nuage à exporter')));
       return;
@@ -389,14 +448,32 @@ class _ScannerPageState extends State<ScannerPage> {
   }
 
   void _toggleQuality() async {
-    final modes = ['performance', 'balanced', 'detail'];
+    final modes = ['performance', 'balanced', 'detail', 'ultra'];
     final idx = modes.indexOf(_quality);
     final next = modes[(idx + 1) % modes.length];
     _quality = next;
-    int maxPts = next == 'detail' ? 80000 : (next == 'balanced' ? 60000 : 40000);
-    double fps = next == 'detail' ? 18.0 : (next == 'balanced' ? 22.0 : 26.0);
+    _ultra = next == 'ultra';
+    final q = _qualityDefaults(next);
+    final double fps = q.$1; final int maxPts = q.$2;
     await _method.invokeMethod('setQuality', {'targetFps': fps, 'maxPoints': maxPts});
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Qualité: $_quality')));
+  }
+
+  (double, int) _qualityDefaults(String q) {
+    if (q == 'detail' || q == 'ultra') return (18.0, 80000);
+    if (q == 'balanced') return (22.0, 60000);
+    return (26.0, 40000);
+  }
+
+  Future<void> _onStopPressed() async {
+    if (_ultra) {
+      final d = _qualityDefaults('detail');
+      final double fps = d.$1; final int maxPts = d.$2;
+      await _method.invokeMethod('setQuality', {'targetFps': 14.0, 'maxPoints': 120000});
+      await Future.delayed(const Duration(milliseconds: 1500));
+      await _method.invokeMethod('setQuality', {'targetFps': fps, 'maxPoints': maxPts});
+    }
+    await _stop();
   }
 }
