@@ -34,6 +34,7 @@ class _ScannerPageState extends State<ScannerPage> {
     'BOX_STRICT': false,
     'FL': true, 'BFL': true, 'OBFL': true, 'FBH': true, 'FBD': true, 'HB': true, 'IH': true,
   };
+  String _quality = 'performance';
   final Map<String, vmath.Vector3> _accum = {};
   final Map<String, int> _accumC = {};
   final double _cell = 0.005;
@@ -173,6 +174,10 @@ class _ScannerPageState extends State<ScannerPage> {
         IconButton(
           icon: const Icon(Icons.straighten),
           onPressed: _toggleDims,
+        ),
+        IconButton(
+          icon: const Icon(Icons.speed),
+          onPressed: _toggleQuality,
         ),
       ]),
       body: Stack(children: [
@@ -381,5 +386,17 @@ class _ScannerPageState extends State<ScannerPage> {
         );
       });
     });
+  }
+
+  void _toggleQuality() async {
+    final modes = ['performance', 'balanced', 'detail'];
+    final idx = modes.indexOf(_quality);
+    final next = modes[(idx + 1) % modes.length];
+    _quality = next;
+    int maxPts = next == 'detail' ? 80000 : (next == 'balanced' ? 60000 : 40000);
+    double fps = next == 'detail' ? 18.0 : (next == 'balanced' ? 22.0 : 26.0);
+    await _method.invokeMethod('setQuality', {'targetFps': fps, 'maxPoints': maxPts});
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Qualité: $_quality')));
   }
 }

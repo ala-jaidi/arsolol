@@ -14,6 +14,10 @@ import ARKit
   private let session = ARSession()
   private var streaming = false
   private var lastVideoTime: CFTimeInterval = 0
+  private var targetFps: Double = 24.0
+  private var maxPoints: Int = 50000
+  private var pixelStep: Int = 4
+  private var lastFrameTs: CFTimeInterval = 0
 
   override func application(
     _ application: UIApplication,
@@ -37,6 +41,12 @@ import ARKit
         case "getCapabilities":
           let supported = ARWorldTrackingConfiguration.isSupported && ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
           result(["platform": "ios", "depth": supported])
+        case "setQuality":
+          if let args = call.arguments as? [String: Any] {
+            if let tf = args["targetFps"] as? Double { self.targetFps = tf }
+            if let mp = args["maxPoints"] as? Int { self.maxPoints = mp }
+          }
+          result(nil)
         default:
           result(FlutterMethodNotImplemented)
         }
@@ -91,6 +101,8 @@ extension AppDelegate: ARSessionDelegate {
     }
     session.run(config, options: [.resetTracking, .removeExistingAnchors])
     streaming = true
+    pixelStep = 4
+    lastFrameTs = CACurrentMediaTime()
   }
 
   private func stopScan() {
@@ -115,8 +127,8 @@ extension AppDelegate: ARSessionDelegate {
     let resolution = camera.imageResolution
     let transform = camera.transform
 
-    var step = 4
-    let maxPoints = 50000
+    var step = pixelStep
+    let maxPoints = self.maxPoints
     let total = width * height
     while (total / (step * step)) > maxPoints { step += 1 }
     var positions: [Float32] = []
@@ -156,7 +168,8 @@ extension AppDelegate: ARSessionDelegate {
     // Video preview at ~10 FPS, downscaled
     if let sink = videoSink {
       let now = CACurrentMediaTime()
-      if lastVideoTime == 0 || (now - lastVideoTime) > 0.1 {
+      let videoInterval = max(0.05, 1.0 / max(10.0, targetFps / 2.0))
+      if lastVideoTime == 0 || (now - lastVideoTime) > videoInterval {
         lastVideoTime = now
         let ci = CIImage(cvPixelBuffer: frame.capturedImage)
         let context = CIContext(options: nil)
@@ -176,5 +189,12 @@ extension AppDelegate: ARSessionDelegate {
         }
       }
     }
+
+    // Adaptive step targeting FPS
+    let t = CACurrentMediaTime()
+    let dt = t - lastFrameTs
+    lastFrameTs = t
+    let target = 1.0 / targetFps
+    if dt > target { pixelStep = min(step + 1, 16) } else { pixelStep = max(step - 1, 1) }
   }
 }

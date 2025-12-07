@@ -38,6 +38,10 @@ class MainActivity : FlutterActivity() {
     private val executor = Executors.newSingleThreadExecutor()
     @Volatile private var streaming = false
     private var installRequested = false
+    @Volatile private var sampleStride: Int = 1
+    private var targetFps: Double = 24.0
+    private var maxPoints: Int = 50000
+    private var lastTs: Long = 0L
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -55,6 +59,18 @@ class MainActivity : FlutterActivity() {
                     "getCapabilities" -> {
                         val ok = hasDepthSupport()
                         result.success(mapOf("platform" to "android", "depth" to ok))
+                    }
+                    "setQuality" -> {
+                        try {
+                            val args = call.arguments as Map<*, *>
+                            val tf = (args["targetFps"] as? Number)?.toDouble()
+                            val mp = (args["maxPoints"] as? Number)?.toInt()
+                            if (tf != null) targetFps = tf
+                            if (mp != null) maxPoints = mp
+                            result.success(null)
+                        } catch (e: Exception) {
+                            result.error("quality_error", e.message, null)
+                        }
                     }
                     else -> result.notImplemented()
                 }
@@ -165,28 +181,38 @@ class MainActivity : FlutterActivity() {
                 val pointsBuffer = pointCloud.points
                 pointsBuffer.rewind()
                 val count = pointsBuffer.remaining() / 4
-                val maxPoints = 50000
-                val stride = if (count > maxPoints) (count / maxPoints) else 1
+                val strideFromCount = if (count > maxPoints) (count / maxPoints) else 1
+                sampleStride = kotlin.math.max(sampleStride, strideFromCount)
+                val stride = sampleStride
                 val sampled = (count + stride - 1) / stride
                 val out = ByteBuffer.allocate(4 + sampled * 12).order(ByteOrder.LITTLE_ENDIAN)
                 out.putInt(sampled)
                 var i = 0
-                var written = 0
+                var idx = 0
                 while (i < count) {
                     val x = pointsBuffer.get()
                     val y = pointsBuffer.get()
                     val z = pointsBuffer.get()
                     pointsBuffer.get()
-                    if ((written % stride) == 0) {
+                    if ((idx % stride) == 0) {
                         out.putFloat(x)
                         out.putFloat(y)
                         out.putFloat(z)
                     }
-                    written++
+                    idx++
                     i++
                 }
                 eventSink?.success(out.array())
                 pointCloud.release()
+
+                // Adaptive stride targeting FPS
+                val t = System.nanoTime()
+                if (lastTs != 0L) {
+                    val dt = (t - lastTs).toDouble() / 1_000_000_000.0
+                    val target = 1.0 / targetFps
+                    sampleStride = if (dt > target) (sampleStride + 1).coerceAtMost(16) else (sampleStride - 1).coerceAtLeast(1)
+                }
+                lastTs = t
 
                 // Video preview at ~10 FPS
                 if (videoSink != null) {
