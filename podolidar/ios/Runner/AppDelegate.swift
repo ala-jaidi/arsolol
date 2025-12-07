@@ -34,6 +34,9 @@ import ARKit
         case "stopScan":
           self.stopScan()
           result(nil)
+        case "getCapabilities":
+          let supported = ARWorldTrackingConfiguration.isSupported && ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
+          result(["platform": "ios", "depth": supported])
         default:
           result(FlutterMethodNotImplemented)
         }

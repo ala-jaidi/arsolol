@@ -52,6 +52,10 @@ class MainActivity : FlutterActivity() {
                         stopScan()
                         result.success(null)
                     }
+                    "getCapabilities" -> {
+                        val ok = hasDepthSupport()
+                        result.success(mapOf("platform" to "android", "depth" to ok))
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -76,6 +80,19 @@ class MainActivity : FlutterActivity() {
                     videoSink = null
                 }
             })
+    }
+
+    private fun hasDepthSupport(): Boolean {
+        return try {
+            val s = Session(this)
+            val cfg = Config(s)
+            cfg.depthMode = Config.DepthMode.AUTOMATIC
+            s.configure(cfg)
+            s.close()
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun startScan() {

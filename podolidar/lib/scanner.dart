@@ -39,6 +39,9 @@ class _ScannerPageState extends State<ScannerPage> {
   final double _cell = 0.005;
   int _lastMetricsMs = 0;
   final int _metricsIntervalMs = 200;
+  final int _targetVox = 3000;
+  double _coverage = 0.0;
+  SevenDims? _dimsPrev;
 
   Future<void> _start() async {
     await _method.invokeMethod('startScan');
@@ -98,10 +101,13 @@ class _ScannerPageState extends State<ScannerPage> {
         }
         final agg = _accum.values.toList(growable: false);
         final now = DateTime.now().millisecondsSinceEpoch;
+        _coverage = (_accum.length / _targetVox).clamp(0.0, 1.0);
         if (now - _lastMetricsMs >= _metricsIntervalMs) {
           try {
             final m = computeMetrics(agg);
-            final d = computeSevenDimensions(agg);
+            final dRaw = computeSevenDimensions(agg);
+            final d = _smoothDims(dRaw, _dimsPrev);
+            _dimsPrev = d;
             setState(() { _points = agg; _metrics = m; _dims = d; _lastMetricsMs = now; });
           } catch (_) {
             setState(() { _points = agg; });
@@ -114,7 +120,9 @@ class _ScannerPageState extends State<ScannerPage> {
         if (now - _lastMetricsMs >= _metricsIntervalMs) {
           try {
             final m = computeMetrics(pts);
-            final d = computeSevenDimensions(pts);
+            final dRaw = computeSevenDimensions(pts);
+            final d = _smoothDims(dRaw, _dimsPrev);
+            _dimsPrev = d;
             setState(() { _points = pts; _metrics = m; _dims = d; _lastMetricsMs = now; });
           } catch (_) {
             setState(() { _points = pts; });
@@ -212,6 +220,18 @@ class _ScannerPageState extends State<ScannerPage> {
             ),
           ),
         ),
+        Positioned(
+          top: 8,
+          left: 8,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(12)),
+            child: Text(
+              'Couverture ${(100*_coverage).toStringAsFixed(0)}% · ${_guideText()}',
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+        ),
       ]),
       bottomNavigationBar: SafeArea(
         child: Padding(
@@ -238,6 +258,50 @@ class _ScannerPageState extends State<ScannerPage> {
         ),
       ),
     );
+  }
+
+  SevenDims? _smoothDims(SevenDims? cur, SevenDims? prev) {
+    if (cur == null) return prev;
+    if (prev == null) return cur;
+    vmath.Vector3 lerp(vmath.Vector3 a, vmath.Vector3 b, double t) => vmath.Vector3(
+      a.x * t + b.x * (1-t),
+      a.y * t + b.y * (1-t),
+      a.z * t + b.z * (1-t),
+    );
+    const t = 0.6; // favor current
+    final flA = lerp(cur.flA, prev.flA, t);
+    final flB = lerp(cur.flB, prev.flB, t);
+    final bflA = lerp(cur.bflA, prev.bflA, t);
+    final bflB = lerp(cur.bflB, prev.bflB, t);
+    final obflA = lerp(cur.obflA, prev.obflA, t);
+    final obflB = lerp(cur.obflB, prev.obflB, t);
+    final fbhA = lerp(cur.fbhA, prev.fbhA, t);
+    final fbhB = lerp(cur.fbhB, prev.fbhB, t);
+    final fbdA = lerp(cur.fbdA, prev.fbdA, t);
+    final fbdB = lerp(cur.fbdB, prev.fbdB, t);
+    final hbA = lerp(cur.hbA, prev.hbA, t);
+    final hbB = lerp(cur.hbB, prev.hbB, t);
+    final ihA = lerp(cur.ihA, prev.ihA, t);
+    final ihB = lerp(cur.ihB, prev.ihB, t);
+    double dist(vmath.Vector3 a, vmath.Vector3 b) => (a - b).length;
+    const cm = 100.0;
+    return SevenDims(
+      flCm: dist(flA, flB) * cm, flA: flA, flB: flB,
+      bflCm: dist(bflA, bflB) * cm, bflA: bflA, bflB: bflB,
+      obflCm: dist(obflA, obflB) * cm, obflA: obflA, obflB: obflB,
+      fbhCm: dist(fbhA, fbhB) * cm, fbhA: fbhA, fbhB: fbhB,
+      fbdCm: dist(fbdA, fbdB) * cm, fbdA: fbdA, fbdB: fbdB,
+      hbCm: dist(hbA, hbB) * cm, hbA: hbA, hbB: hbB,
+      ihCm: dist(ihA, ihB) * cm, ihA: ihA, ihB: ihB,
+    );
+  }
+
+  String _guideText() {
+    final p = _coverage;
+    if (p < 0.3) return 'Vue dessus';
+    if (p < 0.6) return 'Côté médial';
+    if (p < 0.9) return 'Côté latéral';
+    return 'OK';
   }
 
   Widget _metricTile(String label, double? valueCm) {
