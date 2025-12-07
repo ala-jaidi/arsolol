@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:vector_math/vector_math_64.dart' as vmath;
@@ -26,6 +27,11 @@ class _ScannerPageState extends State<ScannerPage> {
   SevenDims? _dims;
   bool _scanning = false;
   bool _accumulate = true;
+  final Map<String, bool> _showDim = {
+    'BOX': true,
+    'BOX_STRICT': false,
+    'FL': true, 'BFL': true, 'OBFL': true, 'FBH': true, 'FBD': true, 'HB': true, 'IH': true,
+  };
   final Map<String, vmath.Vector3> _accum = {};
   final Map<String, int> _accumC = {};
   final double _cell = 0.005;
@@ -150,11 +156,15 @@ class _ScannerPageState extends State<ScannerPage> {
           icon: const Icon(Icons.category),
           onPressed: _exportObj,
         ),
+        IconButton(
+          icon: const Icon(Icons.straighten),
+          onPressed: _toggleDims,
+        ),
       ]),
       body: Stack(children: [
         Column(
           children: [
-            Expanded(child: PointCloudView(points: _points, autoFit: true, dims: _dims)),
+            Expanded(child: PointCloudView(points: _points, autoFit: true, dims: _dims, dimsShow: _showDim)),
             Container(
               padding: const EdgeInsets.all(8),
               color: Colors.black12,
@@ -240,7 +250,9 @@ class _ScannerPageState extends State<ScannerPage> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aucune métrique à exporter')));
       return;
     }
-    final jsonStr = metricsToJson(_metrics!);
+    final base = jsonDecode(metricsToJson(_metrics!));
+    if (_dims != null) { base['seven_dimensions'] = sevenDimsToMap(_dims!); }
+    final jsonStr = jsonEncode(base);
     final dir = await getApplicationDocumentsDirectory();
     final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
     final file = File('${dir.path}/scan_$ts.json');
@@ -254,7 +266,7 @@ class _ScannerPageState extends State<ScannerPage> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aucune métrique à exporter')));
       return;
     }
-    final bytes = await generatePdfReport(_metrics!);
+    final bytes = await generatePdfReportWithDims(_metrics!, _dims);
     final dir = await getApplicationDocumentsDirectory();
     final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
     final file = File('${dir.path}/scan_$ts.pdf');
@@ -279,5 +291,25 @@ class _ScannerPageState extends State<ScannerPage> {
     await file.writeAsString(obj);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('OBJ enregistré: ${file.path}')));
+  }
+
+  void _toggleDims() {
+    showModalBottomSheet(context: context, builder: (_) {
+      return StatefulBuilder(builder: (context, setS) {
+        Widget chip(String k) {
+          return FilterChip(
+            selected: _showDim[k] == true,
+            label: Text(k),
+            onSelected: (v) { setS(() { _showDim[k] = v; }); setState(() {}); },
+          );
+        }
+        return Padding(
+          padding: const EdgeInsets.all(12),
+          child: Wrap(spacing: 8, runSpacing: 8, children: [
+            chip('BOX'), chip('BOX_STRICT'), chip('FL'), chip('BFL'), chip('OBFL'), chip('FBH'), chip('FBD'), chip('HB'), chip('IH'),
+          ]),
+        );
+      });
+    });
   }
 }

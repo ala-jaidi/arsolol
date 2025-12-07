@@ -531,6 +531,82 @@ String metricsToJson(Metrics m) {
   return jsonEncode(map);
 }
 
+Map<String, dynamic> sevenDimsToMap(SevenDims d) {
+  Map<String, double> len = {
+    'FL_cm': d.flCm,
+    'BFL_cm': d.bflCm,
+    'OBFL_cm': d.obflCm,
+    'FBH_cm': d.fbhCm,
+    'FBD_cm': d.fbdCm,
+    'HB_cm': d.hbCm,
+    'IH_cm': d.ihCm,
+  };
+  List<double> p(vmath.Vector3 v) => [v.x, v.y, v.z];
+  Map<String, List<double>> pts = {
+    'FL_A': p(d.flA), 'FL_B': p(d.flB),
+    'BFL_A': p(d.bflA), 'BFL_B': p(d.bflB),
+    'OBFL_A': p(d.obflA), 'OBFL_B': p(d.obflB),
+    'FBH_A': p(d.fbhA), 'FBH_B': p(d.fbhB),
+    'FBD_A': p(d.fbdA), 'FBD_B': p(d.fbdB),
+    'HB_A': p(d.hbA), 'HB_B': p(d.hbB),
+    'IH_A': p(d.ihA), 'IH_B': p(d.ihB),
+  };
+  return {'lengths': len, 'points': pts};
+}
+
+String sevenDimsToJson(SevenDims d) {
+  return jsonEncode(sevenDimsToMap(d));
+}
+
+Future<Uint8List> generatePdfReportWithDims(Metrics m, SevenDims? d) async {
+  final pdf = pw.Document();
+  pdf.addPage(
+    pw.Page(
+      build: (context) => pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Text('Rapport Podologie - Scan LiDAR', style: pw.TextStyle(fontSize: 18)),
+          pw.SizedBox(height: 12),
+          pw.Text('Longueur: ${m.lengthCm.toStringAsFixed(1)} cm'),
+          pw.Text('Largeur: ${m.widthCm.toStringAsFixed(1)} cm'),
+          pw.Text('Hauteur voûte: ${m.archHeightCm.toStringAsFixed(1)} cm'),
+          pw.Text('Angle talon: ${m.heelAngleDeg.toStringAsFixed(1)} °'),
+          pw.Text('Indice voûte: ${(m.archIndex*100).toStringAsFixed(1)} %'),
+          pw.Text('Largeur avant-pied: ${m.forefootWidthCm.toStringAsFixed(1)} cm'),
+          pw.Text('Courbure voûte: ${m.archCurvature.toStringAsFixed(3)} 1/cm'),
+          pw.Text('Ratio voûte/avant-pied: ${m.archForefootRatio.toStringAsFixed(3)}'),
+          pw.SizedBox(height: 6),
+          pw.Text('Largeurs 25/50/75%: ${m.w25Cm.toStringAsFixed(1)} / ${m.w50Cm.toStringAsFixed(1)} / ${m.w75Cm.toStringAsFixed(1)} cm'),
+          pw.Text('Largeur talon: ${m.heelWidthCm.toStringAsFixed(1)} cm'),
+          pw.Text('Chippaux-Smirak: ${m.csiPercent.toStringAsFixed(1)} %'),
+          pw.Text('Staheli ratio: ${m.staheliRatio.toStringAsFixed(3)}'),
+          pw.Text('Clarke angle: ${m.clarkeAngleDeg.toStringAsFixed(1)} °'),
+          pw.Text('Volume: ${m.volumeCm3.toStringAsFixed(1)} cm³'),
+          pw.SizedBox(height: 12),
+          pw.Text('Landmarks (x,y,z):'),
+          pw.Text('M1: ${m.m1Head.x.toStringAsFixed(2)}, ${m.m1Head.y.toStringAsFixed(2)}, ${m.m1Head.z.toStringAsFixed(2)}'),
+          pw.Text('M5: ${m.m5Head.x.toStringAsFixed(2)}, ${m.m5Head.y.toStringAsFixed(2)}, ${m.m5Head.z.toStringAsFixed(2)}'),
+          pw.Text('Naviculaire: ${m.navicular.x.toStringAsFixed(2)}, ${m.navicular.y.toStringAsFixed(2)}, ${m.navicular.z.toStringAsFixed(2)}'),
+          pw.Text('Talon: ${m.heelCenter.x.toStringAsFixed(2)}, ${m.heelCenter.y.toStringAsFixed(2)}, ${m.heelCenter.z.toStringAsFixed(2)}'),
+          if (d != null) ...[
+            pw.SizedBox(height: 16),
+            pw.Text('7 dimensions du pied (cm):', style: pw.TextStyle(fontSize: 16)),
+            pw.SizedBox(height: 6),
+            pw.Text('FL: ${d.flCm.toStringAsFixed(1)}'),
+            pw.Text('BFL: ${d.bflCm.toStringAsFixed(1)}'),
+            pw.Text('OBFL: ${d.obflCm.toStringAsFixed(1)}'),
+            pw.Text('FBH: ${d.fbhCm.toStringAsFixed(1)}'),
+            pw.Text('FBD: ${d.fbdCm.toStringAsFixed(1)}'),
+            pw.Text('HB: ${d.hbCm.toStringAsFixed(1)}'),
+            pw.Text('IH: ${d.ihCm.toStringAsFixed(1)}'),
+          ],
+        ],
+      ),
+    ),
+  );
+  return await pdf.save();
+}
+
 class SevenDims {
   final double flCm;
   final vmath.Vector3 flA;
@@ -554,6 +630,44 @@ class SevenDims {
   final vmath.Vector3 ihA;
   final vmath.Vector3 ihB;
   SevenDims({required this.flCm, required this.flA, required this.flB, required this.bflCm, required this.bflA, required this.bflB, required this.obflCm, required this.obflA, required this.obflB, required this.fbhCm, required this.fbhA, required this.fbhB, required this.fbdCm, required this.fbdA, required this.fbdB, required this.hbCm, required this.hbA, required this.hbB, required this.ihCm, required this.ihA, required this.ihB});
+}
+
+class FootBox {
+  final vmath.Matrix3 R;
+  final vmath.Vector3 mean;
+  final double minX;
+  final double maxX;
+  final double minY;
+  final double maxY;
+  final double minZ;
+  final double maxZ;
+  FootBox(this.R, this.mean, this.minX, this.maxX, this.minY, this.maxY, this.minZ, this.maxZ);
+}
+
+FootBox? computeFootBox(List<vmath.Vector3> pts) {
+  if (pts.isEmpty) return null;
+  final foot = _segmentFoot(pts);
+  if (foot.isEmpty) return null;
+  final mean = _mean(foot);
+  final cov = _covariance(foot, mean);
+  final eig = _eigenDecomposition3x3(cov);
+  final axes = eig.vectors;
+  final order = [0,1,2];
+  order.sort((a,b)=>eig.values[b].compareTo(eig.values[a]));
+  final c0 = vmath.Vector3(axes.entry(0, order[0]), axes.entry(1, order[0]), axes.entry(2, order[0]));
+  final c1 = vmath.Vector3(axes.entry(0, order[1]), axes.entry(1, order[1]), axes.entry(2, order[1]));
+  final c2 = vmath.Vector3(axes.entry(0, order[2]), axes.entry(1, order[2]), axes.entry(2, order[2]));
+  final R = vmath.Matrix3.columns(c0, c1, c2);
+  double minX = double.infinity, maxX = -double.infinity;
+  double minY = double.infinity, maxY = -double.infinity;
+  double minZ = double.infinity, maxZ = -double.infinity;
+  for (final p in foot) {
+    final r = R.transposed().transform(p - mean);
+    if (r.x < minX) minX = r.x; if (r.x > maxX) maxX = r.x;
+    if (r.y < minY) minY = r.y; if (r.y > maxY) maxY = r.y;
+    if (r.z < minZ) minZ = r.z; if (r.z > maxZ) maxZ = r.z;
+  }
+  return FootBox(R, mean, minX, maxX, minY, maxY, minZ, maxZ);
 }
 
 SevenDims? computeSevenDimensions(List<vmath.Vector3> pts) {

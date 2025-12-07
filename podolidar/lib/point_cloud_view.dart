@@ -7,7 +7,8 @@ class PointCloudView extends StatefulWidget {
   final List<vmath.Vector3> points;
   final bool autoFit;
   final SevenDims? dims;
-  const PointCloudView({super.key, required this.points, this.autoFit = true, this.dims});
+  final Map<String, bool>? dimsShow;
+  const PointCloudView({super.key, required this.points, this.autoFit = true, this.dims, this.dimsShow});
 
   @override
   State<PointCloudView> createState() => _PointCloudViewState();
@@ -52,6 +53,7 @@ class _PointCloudViewState extends State<PointCloudView> {
           minZ: _minZ,
           maxZ: _maxZ,
           dims: widget.dims,
+          dimsShow: widget.dimsShow,
         ),
         child: const SizedBox.expand(),
       ),
@@ -105,6 +107,7 @@ class _PointPainter extends CustomPainter {
   final double minZ;
   final double maxZ;
   final SevenDims? dims;
+  final Map<String, bool>? dimsShow;
   _PointPainter({
     required this.points,
     required this.yaw,
@@ -114,6 +117,7 @@ class _PointPainter extends CustomPainter {
     required this.minZ,
     required this.maxZ,
     this.dims,
+    this.dimsShow,
   });
 
   @override
@@ -140,6 +144,7 @@ class _PointPainter extends CustomPainter {
 
     _drawAxes(canvas, size, view);
     _drawGround(canvas, size, view);
+    _drawBox(canvas, size, view);
     _drawDims(canvas, size, view);
   }
 
@@ -177,9 +182,89 @@ class _PointPainter extends CustomPainter {
     }
   }
 
+  void _drawBox(Canvas canvas, Size size, vmath.Matrix4 view) {
+    final d = dims;
+    if (d == null) return;
+    final wantStrict = dimsShow != null && dimsShow!['BOX_STRICT'] == true;
+    final wantBox = dimsShow == null || dimsShow!['BOX'] != false || wantStrict;
+    if (!wantBox) return;
+
+    vmath.Matrix3 R;
+    vmath.Vector3 meanW;
+    double minX, maxX, minY, maxY, minZ, maxZ;
+    bool finite(vmath.Vector3 v) => v.x.isFinite && v.y.isFinite && v.z.isFinite;
+    if (wantStrict) {
+      final fb = computeFootBox(points);
+      if (fb == null) return;
+      R = fb.R; meanW = fb.mean;
+      minX = fb.minX; maxX = fb.maxX;
+      minY = fb.minY; maxY = fb.maxY;
+      minZ = fb.minZ; maxZ = fb.maxZ;
+    } else {
+      var c0 = (d.flB - d.flA).normalized();
+      var c1 = (d.fbhB - d.fbhA).normalized();
+      if (!finite(c0) || !finite(c1)) return;
+      final c2 = vmath.Vector3(
+        c0.y * c1.z - c0.z * c1.y,
+        c0.z * c1.x - c0.x * c1.z,
+        c0.x * c1.y - c0.y * c1.x,
+      ).normalized();
+      if (c2.length2 < 1e-9) return;
+      c1 = vmath.Vector3(
+        c2.y * c0.z - c2.z * c0.y,
+        c2.z * c0.x - c2.x * c0.z,
+        c2.x * c0.y - c2.y * c0.x,
+      ).normalized();
+      R = vmath.Matrix3.columns(c0, c1, c2);
+      minX = double.infinity; maxX = -double.infinity;
+      minY = double.infinity; maxY = -double.infinity;
+      minZ = double.infinity; maxZ = -double.infinity;
+      for (final p in points) {
+        final r = R.transposed().transform(p - center);
+        if (r.x < minX) minX = r.x; if (r.x > maxX) maxX = r.x;
+        if (r.y < minY) minY = r.y; if (r.y > maxY) maxY = r.y;
+        if (r.z < minZ) minZ = r.z; if (r.z > maxZ) maxZ = r.z;
+      }
+      meanW = center;
+    }
+
+    final loc = [
+      vmath.Vector3(minX, minY, minZ),
+      vmath.Vector3(maxX, minY, minZ),
+      vmath.Vector3(maxX, maxY, minZ),
+      vmath.Vector3(minX, maxY, minZ),
+      vmath.Vector3(minX, minY, maxZ),
+      vmath.Vector3(maxX, minY, maxZ),
+      vmath.Vector3(maxX, maxY, maxZ),
+      vmath.Vector3(minX, maxY, maxZ),
+    ];
+    final world = loc.map((v) => meanW + R.transform(v)).toList(growable: false);
+    final screen = world.map((w) { final t = view.transform3(w - center); return ui.Offset(t.x, t.y); }).toList(growable: false);
+    final p = Paint()
+      ..color = const Color(0xFFFFC107)
+      ..strokeWidth = 2;
+    void edge(int a, int b) { canvas.drawLine(screen[a], screen[b], p); }
+    edge(0,1); edge(1,2); edge(2,3); edge(3,0);
+    edge(4,5); edge(5,6); edge(6,7); edge(7,4);
+    edge(0,4); edge(1,5); edge(2,6); edge(3,7);
+    final axisX = vmath.Vector3(R.entry(0,0), R.entry(1,0), R.entry(2,0));
+    final axisY = vmath.Vector3(R.entry(0,1), R.entry(1,1), R.entry(2,1));
+    final axisZ = vmath.Vector3(R.entry(0,2), R.entry(1,2), R.entry(2,2));
+    final x = view.transform3(axisX * 0.12);
+    final y = view.transform3(axisY * 0.12);
+    final z = view.transform3(axisZ * 0.12);
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+    tp.text = const TextSpan(style: TextStyle(color: Colors.amber, fontSize: 12), text: 'X'); tp.layout(); tp.paint(canvas, ui.Offset(x.x, x.y));
+    tp.text = const TextSpan(style: TextStyle(color: Colors.amber, fontSize: 12), text: 'Y'); tp.layout(); tp.paint(canvas, ui.Offset(y.x, y.y));
+    tp.text = const TextSpan(style: TextStyle(color: Colors.amber, fontSize: 12), text: 'Z'); tp.layout(); tp.paint(canvas, ui.Offset(z.x, z.y));
+  }
+
   void _drawDims(Canvas canvas, Size size, vmath.Matrix4 view) {
     final d = dims;
     if (d == null) return;
+    final show = dimsShow ?? const {
+      'FL': true, 'BFL': true, 'OBFL': true, 'FBH': true, 'FBD': true, 'HB': true, 'IH': true,
+    };
     void line(vmath.Vector3 a, vmath.Vector3 b, Color c, String label) {
       final pa = view.transform3(a - center);
       final pb = view.transform3(b - center);
@@ -196,13 +281,13 @@ class _PointPainter extends CustomPainter {
       final mid = ui.Offset((p1.dx + p2.dx) * 0.5, (p1.dy + p2.dy) * 0.5);
       tp.paint(canvas, mid + const Offset(6, -6));
     }
-    line(d.flA, d.flB, Colors.deepPurple, 'FL ${d.flCm.toStringAsFixed(1)} cm');
-    line(d.bflA, d.bflB, Colors.orange, 'BFL ${d.bflCm.toStringAsFixed(1)} cm');
-    line(d.obflA, d.obflB, Colors.redAccent, 'OBFL ${d.obflCm.toStringAsFixed(1)} cm');
-    line(d.fbhA, d.fbhB, Colors.green, 'FBH ${d.fbhCm.toStringAsFixed(1)} cm');
-    line(d.fbdA, d.fbdB, Colors.blueGrey, 'FBD ${d.fbdCm.toStringAsFixed(1)} cm');
-    line(d.hbA, d.hbB, Colors.brown, 'HB ${d.hbCm.toStringAsFixed(1)} cm');
-    line(d.ihA, d.ihB, Colors.teal, 'IH ${d.ihCm.toStringAsFixed(1)} cm');
+    if (show['FL'] == true) line(d.flA, d.flB, Colors.deepPurple, 'FL ${d.flCm.toStringAsFixed(1)} cm');
+    if (show['BFL'] == true) line(d.bflA, d.bflB, Colors.orange, 'BFL ${d.bflCm.toStringAsFixed(1)} cm');
+    if (show['OBFL'] == true) line(d.obflA, d.obflB, Colors.redAccent, 'OBFL ${d.obflCm.toStringAsFixed(1)} cm');
+    if (show['FBH'] == true) line(d.fbhA, d.fbhB, Colors.green, 'FBH ${d.fbhCm.toStringAsFixed(1)} cm');
+    if (show['FBD'] == true) line(d.fbdA, d.fbdB, Colors.blueGrey, 'FBD ${d.fbdCm.toStringAsFixed(1)} cm');
+    if (show['HB'] == true) line(d.hbA, d.hbB, Colors.brown, 'HB ${d.hbCm.toStringAsFixed(1)} cm');
+    if (show['IH'] == true) line(d.ihA, d.ihB, Colors.teal, 'IH ${d.ihCm.toStringAsFixed(1)} cm');
   }
 
   @override
