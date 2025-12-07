@@ -24,7 +24,7 @@ class _ScannerPageState extends State<ScannerPage> {
   List<vmath.Vector3> _points = const [];
   Metrics? _metrics;
   bool _scanning = false;
-  bool _accumulate = false;
+  bool _accumulate = true;
   final Map<String, vmath.Vector3> _accum = {};
   final Map<String, int> _accumC = {};
   final double _cell = 0.005;
@@ -148,36 +148,52 @@ class _ScannerPageState extends State<ScannerPage> {
           onPressed: _exportObj,
         ),
       ]),
-      body: Column(
-        children: [
-          Expanded(child: PointCloudView(points: _points)),
-          Container(
-            padding: const EdgeInsets.all(12),
-            color: Colors.black12,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                _metricTile('Longueur', _metrics?.lengthCm),
-                _metricTile('Largeur', _metrics?.widthCm),
-                _metricTile('Hauteur voûte', _metrics?.archHeightCm),
-                _metricTile('Angle talon', _metrics?.heelAngleDeg),
-                _metricTile('Indice voûte', _metrics == null ? null : (_metrics!.archIndex * 100.0)),
-                _metricTile('Largeur avant-pied', _metrics?.forefootWidthCm),
-                _metricTile('Courbure voûte', _metrics?.archCurvature),
-                _metricTile('Ratio voûte/avant-pied', _metrics?.archForefootRatio),
-                _metricTile('Largeur 25%', _metrics?.w25Cm),
-                _metricTile('Largeur 50%', _metrics?.w50Cm),
-                _metricTile('Largeur 75%', _metrics?.w75Cm),
-                _metricTile('Largeur talon', _metrics?.heelWidthCm),
-                _metricTile('Chippaux-Smirak %', _metrics?.csiPercent),
-                _metricTile('Staheli ratio', _metrics?.staheliRatio),
-                _metricTile('Clarke angle', _metrics?.clarkeAngleDeg),
-                _metricTile('Volume cm³', _metrics?.volumeCm3),
-              ],
+      body: Stack(children: [
+        Column(
+          children: [
+            Expanded(child: PointCloudView(points: _points, autoFit: true)),
+            Container(
+              padding: const EdgeInsets.all(8),
+              color: Colors.black12,
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _metricTile('Longueur', _metrics?.lengthCm),
+                    _metricTile('Largeur', _metrics?.widthCm),
+                    _metricTile('Hauteur voûte', _metrics?.archHeightCm),
+                    _metricTile('Angle talon', _metrics?.heelAngleDeg),
+                    _metricTile('Indice voûte', _metrics == null ? null : (_metrics!.archIndex * 100.0)),
+                    _metricTile('Largeur avant-pied', _metrics?.forefootWidthCm),
+                    _metricTile('Courbure voûte', _metrics?.archCurvature),
+                    _metricTile('Ratio voûte/avant-pied', _metrics?.archForefootRatio),
+                    _metricTile('Largeur 25%', _metrics?.w25Cm),
+                    _metricTile('Largeur 50%', _metrics?.w50Cm),
+                    _metricTile('Largeur 75%', _metrics?.w75Cm),
+                    _metricTile('Largeur talon', _metrics?.heelWidthCm),
+                    _metricTile('Chippaux-Smirak %', _metrics?.csiPercent),
+                    _metricTile('Staheli ratio', _metrics?.staheliRatio),
+                    _metricTile('Clarke angle', _metrics?.clarkeAngleDeg),
+                    _metricTile('Volume cm³', _metrics?.volumeCm3),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        Positioned(
+          top: 8,
+          right: 8,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(12)),
+            child: Text(
+              '${_accumulate ? 'Accumulation' : 'Instantané'} · ${_points.length} pts',
+              style: const TextStyle(color: Colors.white),
             ),
           ),
-        ],
-      ),
+        ),
+      ]),
       bottomNavigationBar: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(12),
@@ -210,8 +226,8 @@ class _ScannerPageState extends State<ScannerPage> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
-        Text(text),
+        Text(label, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+        Text(text, style: const TextStyle(fontSize: 12)),
       ],
     );
   }
