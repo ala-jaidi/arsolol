@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'dart:io';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:vector_math/vector_math_64.dart' as vmath;
@@ -32,6 +33,7 @@ class _ScannerPageState extends State<ScannerPage> {
   final Map<String, bool> _showDim = {
     'BOX': true,
     'BOX_STRICT': false,
+    'GRID': true,
     'FL': true, 'BFL': true, 'OBFL': true, 'FBH': true, 'FBD': true, 'HB': true, 'IH': true,
   };
   String _quality = 'performance';
@@ -49,13 +51,30 @@ class _ScannerPageState extends State<ScannerPage> {
   int _lastEventMs = 0;
   int _startMs = 0;
   bool _calibrated = false;
+  bool _thermalDown = false;
+  int _lastTuneMs = 0;
+  Timer? _watchdog;
+  bool _depthOk = true;
+  bool _restarting = false;
 
   Future<void> _start() async {
+    try {
+      final caps = await _method.invokeMethod('getCapabilities');
+      if (caps is Map) { _depthOk = (caps['depth'] == true); }
+    } catch (_) {}
     await _method.invokeMethod('startScan');
     _sub?.cancel();
     _sub = _events.receiveBroadcastStream().listen(_onEvent);
     _videoSub?.cancel();
     _videoSub = _eventsVideo.receiveBroadcastStream().listen(_onVideo);
+    _watchdog?.cancel();
+    _watchdog = Timer.periodic(const Duration(milliseconds: 700), (_) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (_scanning && !_restarting && (_lastEventMs == 0 || now - _lastEventMs > 900)) {
+        _restarting = true;
+        _method.invokeMethod('stopScan').then((_) => _method.invokeMethod('startScan')).whenComplete(() { _restarting = false; });
+      }
+    });
     setState(() { _scanning = true; _fpsAvg = 0; _lastEventMs = 0; _startMs = DateTime.now().millisecondsSinceEpoch; _calibrated = false; });
   }
 
@@ -65,6 +84,8 @@ class _ScannerPageState extends State<ScannerPage> {
     _sub = null;
     await _videoSub?.cancel();
     _videoSub = null;
+    _watchdog?.cancel();
+    _watchdog = null;
     setState(() => _scanning = false);
   }
 
@@ -116,6 +137,16 @@ class _ScannerPageState extends State<ScannerPage> {
           }
         }
         final agg = _accum.values.toList(growable: false);
+        if (_accum.length > 80000) {
+          var m = vmath.Vector3.zero();
+          for (final p in agg) { m += p; }
+          if (agg.isNotEmpty) m.scale(1.0 / agg.length);
+          final dist = <MapEntry<String, double>>[];
+          _accum.forEach((k, p) { dist.add(MapEntry(k, (p - m).length)); });
+          dist.sort((a,b)=>b.value.compareTo(a.value));
+          final target = 60000;
+          for (int i = 0; i < dist.length - target; i++) { _accum.remove(dist[i].key); _accumC.remove(dist[i].key); }
+        }
         final now = DateTime.now().millisecondsSinceEpoch;
         _coverage = (_accum.length / _targetVox).clamp(0.0, 1.0);
         final guide = _guideText();
@@ -123,6 +154,7 @@ class _ScannerPageState extends State<ScannerPage> {
           _lastGuide = guide;
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(guide == 'OK' ? 'Couverture OK' : 'Continuez: $guide')));
+            SystemSound.play(SystemSoundType.click);
           }
         }
         if (!_calibrated && _scanning && (nowMs - _startMs) > 1500 && _fpsAvg > 0) {
@@ -130,6 +162,20 @@ class _ScannerPageState extends State<ScannerPage> {
           final defaults = _qualityDefaults(_quality);
           _method.invokeMethod('setQuality', {'targetFps': tunedFps, 'maxPoints': defaults.$2});
           _calibrated = true;
+        }
+        final sinceTune = nowMs - _lastTuneMs;
+        if (_fpsAvg > 0 && sinceTune > 1000) {
+          if (_fpsAvg < 16 && !_thermalDown) {
+            _thermalDown = true; _lastTuneMs = nowMs;
+            final defaults = _qualityDefaults(_quality);
+            final mp = (defaults.$2 * 0.7).floor();
+            final tf = defaults.$1 + 2.0;
+            _method.invokeMethod('setQuality', {'targetFps': tf, 'maxPoints': mp});
+          } else if (_fpsAvg > 22 && _thermalDown) {
+            _thermalDown = false; _lastTuneMs = nowMs;
+            final defaults = _qualityDefaults(_quality);
+            _method.invokeMethod('setQuality', {'targetFps': defaults.$1, 'maxPoints': defaults.$2});
+          }
         }
         if (now - _lastMetricsMs >= _metricsIntervalMs) {
           try {
@@ -253,6 +299,16 @@ class _ScannerPageState extends State<ScannerPage> {
             ),
           ),
         ),
+        if (!_depthOk) Positioned(
+          top: 50,
+          left: 8,
+          right: 8,
+          child: Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.circular(8)),
+            child: const Text('Profondeur indisponible: appareil non compatible', style: TextStyle(color: Colors.white)),
+          ),
+        ),
         Positioned(
           top: 8,
           left: 8,
@@ -300,7 +356,7 @@ class _ScannerPageState extends State<ScannerPage> {
               const SizedBox(width: 12),
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: (_scanning && _coverage >= 0.9) ? _onStopPressed : null,
+                  onPressed: (_scanning && _coverage >= _coverageNeeded()) ? _onStopPressed : null,
                   icon: const Icon(Icons.stop),
                   label: const Text('Arrêter'),
                 ),
@@ -356,6 +412,15 @@ class _ScannerPageState extends State<ScannerPage> {
     return 'OK';
   }
 
+  double _coverageNeeded() {
+    final len = _metrics?.lengthCm ?? 20.0;
+    final vol = _metrics?.volumeCm3 ?? 0.0;
+    double t = 0.9;
+    if (len < 22.0) { t = 0.85; } else if (len > 28.0) { t = 0.95; }
+    if (vol > 3000.0) t = math.max(t, 0.93);
+    return t;
+  }
+
   Widget _metricTile(String label, double? valueCm) {
     final text = valueCm == null ? '--' : '${valueCm.toStringAsFixed(1)} cm';
     return Column(
@@ -368,7 +433,7 @@ class _ScannerPageState extends State<ScannerPage> {
   }
 
   Future<void> _exportJson() async {
-    if (_coverage < 0.9) {
+    if (_coverage < _coverageNeeded()) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Couverture ${(100*_coverage).toStringAsFixed(0)}% insuffisante · Continuez: ${_guideText()}')));
       return;
     }
@@ -388,7 +453,7 @@ class _ScannerPageState extends State<ScannerPage> {
   }
 
   Future<void> _exportPdf() async {
-    if (_coverage < 0.9) {
+    if (_coverage < _coverageNeeded()) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Couverture ${(100*_coverage).toStringAsFixed(0)}% insuffisante · Continuez: ${_guideText()}')));
       return;
     }
@@ -406,7 +471,7 @@ class _ScannerPageState extends State<ScannerPage> {
   }
 
   Future<void> _exportObj() async {
-    if (_coverage < 0.9) {
+    if (_coverage < _coverageNeeded()) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Couverture ${(100*_coverage).toStringAsFixed(0)}% insuffisante · Continuez: ${_guideText()}')));
       return;
     }
@@ -440,7 +505,7 @@ class _ScannerPageState extends State<ScannerPage> {
         return Padding(
           padding: const EdgeInsets.all(12),
           child: Wrap(spacing: 8, runSpacing: 8, children: [
-            chip('BOX'), chip('BOX_STRICT'), chip('FL'), chip('BFL'), chip('OBFL'), chip('FBH'), chip('FBD'), chip('HB'), chip('IH'),
+            chip('BOX'), chip('BOX_STRICT'), chip('GRID'), chip('FL'), chip('BFL'), chip('OBFL'), chip('FBH'), chip('FBD'), chip('HB'), chip('IH'),
           ]),
         );
       });

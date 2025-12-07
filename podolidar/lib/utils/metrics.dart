@@ -670,6 +670,13 @@ FootBox? computeFootBox(List<vmath.Vector3> pts) {
   return FootBox(R, mean, minX, maxX, minY, maxY, minZ, maxZ);
 }
 
+vmath.Vector3 computeGroundNormal(List<vmath.Vector3> pts) {
+  if (pts.isEmpty) return vmath.Vector3(0,1,0);
+  final plane = _adaptivePlane(pts);
+  final n = (plane[0] as vmath.Vector3).normalized();
+  return n.length2 > 1e-9 ? n : vmath.Vector3(0,1,0);
+}
+
 SevenDims? computeSevenDimensions(List<vmath.Vector3> pts) {
   if (pts.isEmpty) return null;
   final foot = _segmentFoot(pts);

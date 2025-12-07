@@ -175,17 +175,27 @@ class _PointPainter extends CustomPainter {
   }
 
   void _drawGround(Canvas canvas, Size size, vmath.Matrix4 view) {
+    final show = dimsShow ?? const {'GRID': true};
+    if (show['GRID'] == false) return;
+    final n = computeGroundNormal(points);
+    vmath.Vector3 chooseRef() => (n.z.abs() < 0.9) ? vmath.Vector3(0,0,1) : vmath.Vector3(0,1,0);
+    final u = n.cross(chooseRef()).normalized();
+    final v = n.cross(u).normalized();
     final gridPaint = Paint()
       ..color = const Color.fromRGBO(128, 128, 128, 0.3)
       ..strokeWidth = 1;
-    for (double x = -0.5; x <= 0.5; x += 0.1) {
-      final a = view.transform3(vmath.Vector3(x, -0.5, 0));
-      final b = view.transform3(vmath.Vector3(x, 0.5, 0));
+    for (double s = -0.5; s <= 0.5; s += 0.1) {
+      final a3 = center + (u * s) + (v * -0.5);
+      final b3 = center + (u * s) + (v * 0.5);
+      final a = view.transform3(a3 - center);
+      final b = view.transform3(b3 - center);
       canvas.drawLine(ui.Offset(a.x, a.y), ui.Offset(b.x, b.y), gridPaint);
     }
-    for (double y = -0.5; y <= 0.5; y += 0.1) {
-      final a = view.transform3(vmath.Vector3(-0.5, y, 0));
-      final b = view.transform3(vmath.Vector3(0.5, y, 0));
+    for (double t = -0.5; t <= 0.5; t += 0.1) {
+      final a3 = center + (u * -0.5) + (v * t);
+      final b3 = center + (u * 0.5) + (v * t);
+      final a = view.transform3(a3 - center);
+      final b = view.transform3(b3 - center);
       canvas.drawLine(ui.Offset(a.x, a.y), ui.Offset(b.x, b.y), gridPaint);
     }
   }
@@ -205,6 +215,14 @@ class _PointPainter extends CustomPainter {
       final fb = computeFootBox(points);
       if (fb == null) return;
       R = fb.R; meanW = fb.mean;
+      final gn = computeGroundNormal(points);
+      final axisZ = vmath.Vector3(R.entry(0,2), R.entry(1,2), R.entry(2,2)).normalized();
+      if (axisZ.dot(gn).abs() < 0.7) {
+        final axisX0 = vmath.Vector3(R.entry(0,0), R.entry(1,0), R.entry(2,0));
+        final axisX = (axisX0 - gn * axisX0.dot(gn)).normalized();
+        final axisY = gn.cross(axisX).normalized();
+        R = vmath.Matrix3.columns(axisX, axisY, gn);
+      }
       minX = fb.minX; maxX = fb.maxX;
       minY = fb.minY; maxY = fb.maxY;
       minZ = fb.minZ; maxZ = fb.maxZ;
