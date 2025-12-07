@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'dart:ui' as ui;
 import 'package:vector_math/vector_math_64.dart' as vmath;
+import 'utils/metrics.dart';
 
 class PointCloudView extends StatefulWidget {
   final List<vmath.Vector3> points;
   final bool autoFit;
-  const PointCloudView({super.key, required this.points, this.autoFit = true});
+  final SevenDims? dims;
+  const PointCloudView({super.key, required this.points, this.autoFit = true, this.dims});
 
   @override
   State<PointCloudView> createState() => _PointCloudViewState();
@@ -49,6 +51,7 @@ class _PointCloudViewState extends State<PointCloudView> {
           center: _center,
           minZ: _minZ,
           maxZ: _maxZ,
+          dims: widget.dims,
         ),
         child: const SizedBox.expand(),
       ),
@@ -101,6 +104,7 @@ class _PointPainter extends CustomPainter {
   final vmath.Vector3 center;
   final double minZ;
   final double maxZ;
+  final SevenDims? dims;
   _PointPainter({
     required this.points,
     required this.yaw,
@@ -109,6 +113,7 @@ class _PointPainter extends CustomPainter {
     required this.center,
     required this.minZ,
     required this.maxZ,
+    this.dims,
   });
 
   @override
@@ -135,6 +140,7 @@ class _PointPainter extends CustomPainter {
 
     _drawAxes(canvas, size, view);
     _drawGround(canvas, size, view);
+    _drawDims(canvas, size, view);
   }
 
   void _drawAxes(Canvas canvas, Size size, vmath.Matrix4 view) {
@@ -169,6 +175,34 @@ class _PointPainter extends CustomPainter {
       final b = view.transform3(vmath.Vector3(0.5, y, 0));
       canvas.drawLine(ui.Offset(a.x, a.y), ui.Offset(b.x, b.y), gridPaint);
     }
+  }
+
+  void _drawDims(Canvas canvas, Size size, vmath.Matrix4 view) {
+    final d = dims;
+    if (d == null) return;
+    void line(vmath.Vector3 a, vmath.Vector3 b, Color c, String label) {
+      final pa = view.transform3(a - center);
+      final pb = view.transform3(b - center);
+      final p1 = ui.Offset(pa.x, pa.y);
+      final p2 = ui.Offset(pb.x, pb.y);
+      final p = Paint()..color = c..strokeWidth = 3;
+      canvas.drawLine(p1, p2, p);
+      final dot = Paint()..color = c..style = PaintingStyle.fill;
+      canvas.drawCircle(p1, 4, dot);
+      canvas.drawCircle(p2, 4, dot);
+      final tp = TextPainter(textDirection: TextDirection.ltr);
+      tp.text = TextSpan(style: const TextStyle(color: Colors.black, backgroundColor: Color.fromRGBO(255,255,255,0.7), fontSize: 12), text: label);
+      tp.layout();
+      final mid = ui.Offset((p1.dx + p2.dx) * 0.5, (p1.dy + p2.dy) * 0.5);
+      tp.paint(canvas, mid + const Offset(6, -6));
+    }
+    line(d.flA, d.flB, Colors.deepPurple, 'FL ${d.flCm.toStringAsFixed(1)} cm');
+    line(d.bflA, d.bflB, Colors.orange, 'BFL ${d.bflCm.toStringAsFixed(1)} cm');
+    line(d.obflA, d.obflB, Colors.redAccent, 'OBFL ${d.obflCm.toStringAsFixed(1)} cm');
+    line(d.fbhA, d.fbhB, Colors.green, 'FBH ${d.fbhCm.toStringAsFixed(1)} cm');
+    line(d.fbdA, d.fbdB, Colors.blueGrey, 'FBD ${d.fbdCm.toStringAsFixed(1)} cm');
+    line(d.hbA, d.hbB, Colors.brown, 'HB ${d.hbCm.toStringAsFixed(1)} cm');
+    line(d.ihA, d.ihB, Colors.teal, 'IH ${d.ihCm.toStringAsFixed(1)} cm');
   }
 
   @override

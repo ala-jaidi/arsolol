@@ -23,6 +23,7 @@ class _ScannerPageState extends State<ScannerPage> {
   StreamSubscription? _sub;
   List<vmath.Vector3> _points = const [];
   Metrics? _metrics;
+  SevenDims? _dims;
   bool _scanning = false;
   bool _accumulate = true;
   final Map<String, vmath.Vector3> _accum = {};
@@ -88,7 +89,8 @@ class _ScannerPageState extends State<ScannerPage> {
         if (now - _lastMetricsMs >= _metricsIntervalMs) {
           try {
             final m = computeMetrics(agg);
-            setState(() { _points = agg; _metrics = m; _lastMetricsMs = now; });
+            final d = computeSevenDimensions(agg);
+            setState(() { _points = agg; _metrics = m; _dims = d; _lastMetricsMs = now; });
           } catch (_) {
             setState(() { _points = agg; });
           }
@@ -100,7 +102,8 @@ class _ScannerPageState extends State<ScannerPage> {
         if (now - _lastMetricsMs >= _metricsIntervalMs) {
           try {
             final m = computeMetrics(pts);
-            setState(() { _points = pts; _metrics = m; _lastMetricsMs = now; });
+            final d = computeSevenDimensions(pts);
+            setState(() { _points = pts; _metrics = m; _dims = d; _lastMetricsMs = now; });
           } catch (_) {
             setState(() { _points = pts; });
           }
@@ -151,7 +154,7 @@ class _ScannerPageState extends State<ScannerPage> {
       body: Stack(children: [
         Column(
           children: [
-            Expanded(child: PointCloudView(points: _points, autoFit: true)),
+            Expanded(child: PointCloudView(points: _points, autoFit: true, dims: _dims)),
             Container(
               padding: const EdgeInsets.all(8),
               color: Colors.black12,

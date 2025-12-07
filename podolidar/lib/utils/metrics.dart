@@ -531,6 +531,113 @@ String metricsToJson(Metrics m) {
   return jsonEncode(map);
 }
 
+class SevenDims {
+  final double flCm;
+  final vmath.Vector3 flA;
+  final vmath.Vector3 flB;
+  final double bflCm;
+  final vmath.Vector3 bflA;
+  final vmath.Vector3 bflB;
+  final double obflCm;
+  final vmath.Vector3 obflA;
+  final vmath.Vector3 obflB;
+  final double fbhCm;
+  final vmath.Vector3 fbhA;
+  final vmath.Vector3 fbhB;
+  final double fbdCm;
+  final vmath.Vector3 fbdA;
+  final vmath.Vector3 fbdB;
+  final double hbCm;
+  final vmath.Vector3 hbA;
+  final vmath.Vector3 hbB;
+  final double ihCm;
+  final vmath.Vector3 ihA;
+  final vmath.Vector3 ihB;
+  SevenDims({required this.flCm, required this.flA, required this.flB, required this.bflCm, required this.bflA, required this.bflB, required this.obflCm, required this.obflA, required this.obflB, required this.fbhCm, required this.fbhA, required this.fbhB, required this.fbdCm, required this.fbdA, required this.fbdB, required this.hbCm, required this.hbA, required this.hbB, required this.ihCm, required this.ihA, required this.ihB});
+}
+
+SevenDims? computeSevenDimensions(List<vmath.Vector3> pts) {
+  if (pts.isEmpty) return null;
+  final foot = _segmentFoot(pts);
+  if (foot.isEmpty) return null;
+  final mean = _mean(foot);
+  final cov = _covariance(foot, mean);
+  final eig = _eigenDecomposition3x3(cov);
+  final axes = eig.vectors;
+  final order = [0,1,2];
+  order.sort((a,b)=>eig.values[b].compareTo(eig.values[a]));
+  final c0 = vmath.Vector3(axes.entry(0, order[0]), axes.entry(1, order[0]), axes.entry(2, order[0]));
+  final c1 = vmath.Vector3(axes.entry(0, order[1]), axes.entry(1, order[1]), axes.entry(2, order[1]));
+  final c2 = vmath.Vector3(axes.entry(0, order[2]), axes.entry(1, order[2]), axes.entry(2, order[2]));
+  final R = vmath.Matrix3.columns(c0, c1, c2);
+  double minX = double.infinity, maxX = -double.infinity;
+  double minY = double.infinity, maxY = -double.infinity;
+  double minZ = double.infinity;
+  vmath.Vector3? toeR;
+  for (final p in foot) {
+    final r = R.transposed().transform(p - mean);
+    if (r.x < minX) minX = r.x; if (r.x > maxX) { maxX = r.x; toeR = r; }
+    if (r.y < minY) minY = r.y; if (r.y > maxY) maxY = r.y;
+    if (p.z < minZ) minZ = p.z;
+  }
+  final toeW = mean + R.transform(toeR ?? vmath.Vector3(maxX, (minY+maxY)*0.5, 0));
+  final rearEnd = minX + 0.15 * (maxX - minX);
+  final frontStart = minX + 0.85 * (maxX - minX);
+  final lm = _detectLandmarks(foot, mean, R, minX, maxX, minY, maxY);
+  vmath.Vector3 hbAL = vmath.Vector3.zero();
+  vmath.Vector3 hbBL = vmath.Vector3.zero();
+  double hbMinY = double.infinity, hbMaxY = -double.infinity;
+  vmath.Vector3 fbhAL = vmath.Vector3.zero();
+  vmath.Vector3 fbhBL = vmath.Vector3.zero();
+  double fbhMinY = double.infinity, fbhMaxY = -double.infinity;
+  vmath.Vector3? latFront;
+  double latFrontZ = -double.infinity;
+  for (final p in foot) {
+    final r = R.transposed().transform(p - mean);
+    if (r.x <= rearEnd) {
+      if (r.y < hbMinY) { hbMinY = r.y; hbAL = p; }
+      if (r.y > hbMaxY) { hbMaxY = r.y; hbBL = p; }
+    }
+    if (r.x >= frontStart) {
+      if (r.y < fbhMinY) { fbhMinY = r.y; fbhAL = p; }
+      if (r.y > fbhMaxY) { fbhMaxY = r.y; fbhBL = p; }
+      if (r.z > latFrontZ) { latFrontZ = r.z; latFront = p; }
+    }
+  }
+  final flA = lm.heel;
+  final flB = toeW;
+  final bflA = lm.heel;
+  final bflB = lm.m1;
+  final obflA = lm.heel;
+  final obflB = lm.m5;
+  final fbhA = fbhAL;
+  final fbhB = fbhBL;
+  final fbdA = lm.m1;
+  final fbdB = (latFront ?? lm.m5);
+  final hbA = hbAL;
+  final hbB = hbBL;
+  final ihA = vmath.Vector3(lm.nav.x, lm.nav.y, minZ);
+  final ihB = lm.nav;
+  double dist(vmath.Vector3 a, vmath.Vector3 b) { return (a - b).length; }
+  final cm = 100.0;
+  return SevenDims(
+    flCm: dist(flA, flB) * cm,
+    flA: flA, flB: flB,
+    bflCm: dist(bflA, bflB) * cm,
+    bflA: bflA, bflB: bflB,
+    obflCm: dist(obflA, obflB) * cm,
+    obflA: obflA, obflB: obflB,
+    fbhCm: dist(fbhA, fbhB) * cm,
+    fbhA: fbhA, fbhB: fbhB,
+    fbdCm: dist(fbdA, fbdB) * cm,
+    fbdA: fbdA, fbdB: fbdB,
+    hbCm: dist(hbA, hbB) * cm,
+    hbA: hbA, hbB: hbB,
+    ihCm: dist(ihA, ihB) * cm,
+    ihA: ihA, ihB: ihB,
+  );
+}
+
 Future<Uint8List> generatePdfReport(Metrics m) async {
   final pdf = pw.Document();
   pdf.addPage(
