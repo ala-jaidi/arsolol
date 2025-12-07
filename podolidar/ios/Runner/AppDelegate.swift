@@ -56,6 +56,7 @@ extension AppDelegate: FlutterStreamHandler {
 
 extension AppDelegate: ARSessionDelegate {
   private func startScan() {
+    if streaming { return }
     guard ARWorldTrackingConfiguration.isSupported else { return }
     let config = ARWorldTrackingConfiguration()
     config.frameSemantics = [.sceneDepth]
@@ -89,7 +90,10 @@ extension AppDelegate: ARSessionDelegate {
     let resolution = camera.imageResolution
     let transform = camera.transform
 
-    let step = 4
+    var step = 4
+    let maxPoints = 50000
+    let total = width * height
+    while (total / (step * step)) > maxPoints { step += 1 }
     var positions: [Float32] = []
     positions.reserveCapacity((width/step)*(height/step)*3)
 
