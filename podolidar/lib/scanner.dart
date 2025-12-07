@@ -19,11 +19,14 @@ class ScannerPage extends StatefulWidget {
 class _ScannerPageState extends State<ScannerPage> {
   static const _method = MethodChannel('com.podo.lidar/scanner');
   static const _events = EventChannel('com.podo.lidar/points');
+  static const _eventsVideo = EventChannel('com.podo.lidar/video');
 
   StreamSubscription? _sub;
+  StreamSubscription? _videoSub;
   List<vmath.Vector3> _points = const [];
   Metrics? _metrics;
   SevenDims? _dims;
+  Uint8List? _videoJpeg;
   bool _scanning = false;
   bool _accumulate = true;
   final Map<String, bool> _showDim = {
@@ -41,6 +44,8 @@ class _ScannerPageState extends State<ScannerPage> {
     await _method.invokeMethod('startScan');
     _sub?.cancel();
     _sub = _events.receiveBroadcastStream().listen(_onEvent);
+    _videoSub?.cancel();
+    _videoSub = _eventsVideo.receiveBroadcastStream().listen(_onVideo);
     setState(() => _scanning = true);
   }
 
@@ -48,6 +53,8 @@ class _ScannerPageState extends State<ScannerPage> {
     await _method.invokeMethod('stopScan');
     await _sub?.cancel();
     _sub = null;
+    await _videoSub?.cancel();
+    _videoSub = null;
     setState(() => _scanning = false);
   }
 
@@ -119,6 +126,12 @@ class _ScannerPageState extends State<ScannerPage> {
     }
   }
 
+  void _onVideo(dynamic data) {
+    if (data is Uint8List) {
+      setState(() { _videoJpeg = data; });
+    }
+  }
+
   @override
   void dispose() {
     _sub?.cancel();
@@ -157,7 +170,7 @@ class _ScannerPageState extends State<ScannerPage> {
       body: Stack(children: [
         Column(
           children: [
-            Expanded(child: PointCloudView(points: _points, autoFit: true, dims: _dims, dimsShow: _showDim)),
+            Expanded(child: PointCloudView(points: _points, autoFit: true, dims: _dims, dimsShow: _showDim, backgroundJpeg: _videoJpeg)),
             Container(
               padding: const EdgeInsets.all(8),
               color: Colors.black12,

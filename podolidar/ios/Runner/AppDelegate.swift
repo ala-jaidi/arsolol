@@ -6,11 +6,14 @@ import ARKit
 @objc class AppDelegate: FlutterAppDelegate {
   private var methodChannel: FlutterMethodChannel?
   private var eventChannel: FlutterEventChannel?
+  private var videoEventChannel: FlutterEventChannel?
   private var eventSink: FlutterEventSink?
+  private var videoSink: FlutterEventSink?
   private let channelName = "com.podo.lidar/scanner"
   private let eventName = "com.podo.lidar/points"
   private let session = ARSession()
   private var streaming = false
+  private var lastVideoTime: CFTimeInterval = 0
 
   override func application(
     _ application: UIApplication,
@@ -20,6 +23,7 @@ import ARKit
     if let controller = window?.rootViewController as? FlutterViewController {
       methodChannel = FlutterMethodChannel(name: channelName, binaryMessenger: controller.binaryMessenger)
       eventChannel = FlutterEventChannel(name: eventName, binaryMessenger: controller.binaryMessenger)
+      videoEventChannel = FlutterEventChannel(name: "com.podo.lidar/video", binaryMessenger: controller.binaryMessenger)
 
       methodChannel?.setMethodCallHandler { [weak self] call, result in
         guard let self = self else { return }
@@ -36,6 +40,7 @@ import ARKit
       }
 
       eventChannel?.setStreamHandler(self)
+      videoEventChannel?.setStreamHandler(VideoStreamHandler { [weak self] sink in self?.videoSink = sink }, onCancel: { [weak self] in self?.videoSink = nil })
     }
     session.delegate = self
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
@@ -50,6 +55,23 @@ extension AppDelegate: FlutterStreamHandler {
 
   func onCancel(withArguments arguments: Any?) -> FlutterError? {
     eventSink = nil
+    return nil
+  }
+}
+
+class VideoStreamHandler: NSObject, FlutterStreamHandler {
+  private let onListenHandler: (FlutterEventSink?) -> Void
+  private let onCancelHandler: () -> Void
+  init(_ onListen: @escaping (FlutterEventSink?) -> Void, onCancel: @escaping () -> Void) {
+    self.onListenHandler = onListen
+    self.onCancelHandler = onCancel
+  }
+  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+    onListenHandler(events)
+    return nil
+  }
+  func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    onCancelHandler()
     return nil
   }
 }
@@ -127,5 +149,29 @@ extension AppDelegate: ARSessionDelegate {
       data.append(raw.bindMemory(to: UInt8.self))
     }
     eventSink?(FlutterStandardTypedData(bytes: data))
+
+    // Video preview at ~10 FPS, downscaled
+    if let sink = videoSink {
+      let now = CACurrentMediaTime()
+      if lastVideoTime == 0 || (now - lastVideoTime) > 0.1 {
+        lastVideoTime = now
+        let ci = CIImage(cvPixelBuffer: frame.capturedImage)
+        let context = CIContext(options: nil)
+        let rect = ci.extent
+        let scale: CGFloat = 640.0 / rect.width
+        let targetW = Int(rect.width * scale)
+        let targetH = Int(rect.height * scale)
+        if let cg = context.createCGImage(ci, from: rect) {
+          let uiImage = UIImage(cgImage: cg)
+          UIGraphicsBeginImageContext(CGSize(width: targetW, height: targetH))
+          uiImage.draw(in: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+          let scaled = UIGraphicsGetImageFromCurrentImageContext()
+          UIGraphicsEndImageContext()
+          if let img = scaled, let bytes = img.jpegData(compressionQuality: 0.6) {
+            sink(FlutterStandardTypedData(bytes: bytes))
+          }
+        }
+      }
+    }
   }
 }

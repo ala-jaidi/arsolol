@@ -12,10 +12,15 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.view.TextureRegistry
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
 import com.google.ar.core.Session
+import android.media.Image
+import android.graphics.ImageFormat
+import android.graphics.YuvImage
+import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.Executors
@@ -23,7 +28,9 @@ import java.util.concurrent.Executors
 class MainActivity : FlutterActivity() {
     private val methodChannelName = "com.podo.lidar/scanner"
     private val eventChannelName = "com.podo.lidar/points"
+    private val videoChannelName = "com.podo.lidar/video"
     private var eventSink: EventChannel.EventSink? = null
+    private var videoSink: EventChannel.EventSink? = null
 
     private var session: Session? = null
     private var textureId: Int = -1
@@ -57,6 +64,16 @@ class MainActivity : FlutterActivity() {
 
                 override fun onCancel(arguments: Any?) {
                     eventSink = null
+                }
+            })
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, videoChannelName)
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    videoSink = events
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    videoSink = null
                 }
             })
     }
@@ -153,11 +170,53 @@ class MainActivity : FlutterActivity() {
                 }
                 eventSink?.success(out.array())
                 pointCloud.release()
+
+                // Video preview at ~10 FPS
+                if (videoSink != null) {
+                    try {
+                        val img: Image = frame.acquireCameraImage()
+                        val nv21 = yuv420ToNv21(img)
+                        val yuv = YuvImage(nv21, ImageFormat.NV21, img.width, img.height, null)
+                        val baos = ByteArrayOutputStream()
+                        yuv.compressToJpeg(android.graphics.Rect(0, 0, img.width, img.height), 60, baos)
+                        videoSink?.success(baos.toByteArray())
+                        baos.close()
+                        img.close()
+                    } catch (_: Exception) {}
+                }
             } catch (e: Exception) {
                 Log.e("Lidar", "Streaming error", e)
                 streaming = false
             }
         }
+    }
+
+    private fun yuv420ToNv21(image: Image): ByteArray {
+        val w = image.width
+        val h = image.height
+        val ySize = w * h
+        val uvSize = w * h / 2
+        val nv21 = ByteArray(ySize + uvSize)
+        val yBuffer = image.planes[0].buffer
+        val uBuffer = image.planes[1].buffer
+        val vBuffer = image.planes[2].buffer
+        yBuffer.get(nv21, 0, ySize)
+        val uRowStride = image.planes[1].rowStride
+        val vRowStride = image.planes[2].rowStride
+        val uPixelStride = image.planes[1].pixelStride
+        val vPixelStride = image.planes[2].pixelStride
+        var pos = ySize
+        for (row in 0 until h/2) {
+            var col = 0
+            while (col < w/2) {
+                val vu = vBuffer.get(row * vRowStride + col * vPixelStride)
+                val uu = uBuffer.get(row * uRowStride + col * uPixelStride)
+                nv21[pos++] = vu
+                nv21[pos++] = uu
+                col++
+            }
+        }
+        return nv21
     }
 
     private fun createExternalTextureId(): Int {

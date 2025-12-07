@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dart:ui' as ui;
+import 'dart:typed_data';
 import 'package:vector_math/vector_math_64.dart' as vmath;
 import 'utils/metrics.dart';
 
@@ -8,7 +9,8 @@ class PointCloudView extends StatefulWidget {
   final bool autoFit;
   final SevenDims? dims;
   final Map<String, bool>? dimsShow;
-  const PointCloudView({super.key, required this.points, this.autoFit = true, this.dims, this.dimsShow});
+  final Uint8List? backgroundJpeg;
+  const PointCloudView({super.key, required this.points, this.autoFit = true, this.dims, this.dimsShow, this.backgroundJpeg});
 
   @override
   State<PointCloudView> createState() => _PointCloudViewState();
@@ -43,19 +45,25 @@ class _PointCloudViewState extends State<PointCloudView> {
           _pitch += d.focalPointDelta.dy * 0.005;
         });
       },
-      child: CustomPaint(
-        painter: _PointPainter(
-          points: widget.points,
-          yaw: _yaw,
-          pitch: _pitch,
-          zoom: widget.autoFit ? _fitZoom : _zoom,
-          center: _center,
-          minZ: _minZ,
-          maxZ: _maxZ,
-          dims: widget.dims,
-          dimsShow: widget.dimsShow,
-        ),
-        child: const SizedBox.expand(),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (widget.backgroundJpeg != null) Image.memory(widget.backgroundJpeg!, fit: BoxFit.cover, gaplessPlayback: true),
+          CustomPaint(
+            painter: _PointPainter(
+              points: widget.points,
+              yaw: _yaw,
+              pitch: _pitch,
+              zoom: widget.autoFit ? _fitZoom : _zoom,
+              center: _center,
+              minZ: _minZ,
+              maxZ: _maxZ,
+              dims: widget.dims,
+              dimsShow: widget.dimsShow,
+            ),
+            child: const SizedBox.expand(),
+          ),
+        ],
       ),
     );
   }
