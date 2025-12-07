@@ -28,6 +28,8 @@ class _ScannerPageState extends State<ScannerPage> {
   final Map<String, vmath.Vector3> _accum = {};
   final Map<String, int> _accumC = {};
   final double _cell = 0.005;
+  int _lastMetricsMs = 0;
+  final int _metricsIntervalMs = 200;
 
   Future<void> _start() async {
     await _method.invokeMethod('startScan');
@@ -46,7 +48,13 @@ class _ScannerPageState extends State<ScannerPage> {
   void _onEvent(dynamic data) {
     if (data is Uint8List) {
       final bd = ByteData.sublistView(data);
-      final count = bd.getInt32(0, Endian.little);
+      if (bd.lengthInBytes < 4) return;
+      int count = bd.getInt32(0, Endian.little);
+      final maxCount = ((bd.lengthInBytes - 4) ~/ 12);
+      if (count < 0 || count > maxCount) {
+        count = maxCount;
+        if (count <= 0) return;
+      }
       final pts = <vmath.Vector3>[];
       for (int i = 0; i < count; i++) {
         final base = 4 + i * 12;
@@ -76,15 +84,29 @@ class _ScannerPageState extends State<ScannerPage> {
           }
         }
         final agg = _accum.values.toList(growable: false);
-        setState(() {
-          _points = agg;
-          _metrics = computeMetrics(agg);
-        });
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (now - _lastMetricsMs >= _metricsIntervalMs) {
+          try {
+            final m = computeMetrics(agg);
+            setState(() { _points = agg; _metrics = m; _lastMetricsMs = now; });
+          } catch (_) {
+            setState(() { _points = agg; });
+          }
+        } else {
+          setState(() { _points = agg; });
+        }
       } else {
-        setState(() {
-          _points = pts;
-          _metrics = computeMetrics(pts);
-        });
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (now - _lastMetricsMs >= _metricsIntervalMs) {
+          try {
+            final m = computeMetrics(pts);
+            setState(() { _points = pts; _metrics = m; _lastMetricsMs = now; });
+          } catch (_) {
+            setState(() { _points = pts; });
+          }
+        } else {
+          setState(() { _points = pts; });
+        }
       }
     }
   }
