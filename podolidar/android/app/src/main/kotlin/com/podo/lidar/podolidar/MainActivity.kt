@@ -131,16 +131,25 @@ class MainActivity : FlutterActivity() {
                 val pointsBuffer = pointCloud.points
                 pointsBuffer.rewind()
                 val count = pointsBuffer.remaining() / 4
-                val out = ByteBuffer.allocate(4 + count * 12).order(ByteOrder.LITTLE_ENDIAN)
-                out.putInt(count)
-                for (i in 0 until count) {
+                val maxPoints = 50000
+                val stride = if (count > maxPoints) (count / maxPoints) else 1
+                val sampled = (count + stride - 1) / stride
+                val out = ByteBuffer.allocate(4 + sampled * 12).order(ByteOrder.LITTLE_ENDIAN)
+                out.putInt(sampled)
+                var i = 0
+                var written = 0
+                while (i < count) {
                     val x = pointsBuffer.get()
                     val y = pointsBuffer.get()
                     val z = pointsBuffer.get()
                     pointsBuffer.get()
-                    out.putFloat(x)
-                    out.putFloat(y)
-                    out.putFloat(z)
+                    if ((written % stride) == 0) {
+                        out.putFloat(x)
+                        out.putFloat(y)
+                        out.putFloat(z)
+                    }
+                    written++
+                    i++
                 }
                 eventSink?.success(out.array())
                 pointCloud.release()

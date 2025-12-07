@@ -8,7 +8,6 @@ import 'package:vector_math/vector_math_64.dart' as vmath;
 import 'package:path_provider/path_provider.dart';
 import 'point_cloud_view.dart';
 import 'utils/metrics.dart';
-import 'camera_fallback.dart';
 
 class ScannerPage extends StatefulWidget {
   const ScannerPage({super.key});
@@ -130,12 +129,6 @@ class _ScannerPageState extends State<ScannerPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Scanner Lidar - Podologie'), actions: [
-        IconButton(
-          icon: const Icon(Icons.camera_alt),
-          onPressed: () {
-            Navigator.of(context).push(MaterialPageRoute(builder: (_) => const CameraFallbackPage()));
-          },
-        ),
         IconButton(
           icon: Icon(_accumulate ? Icons.layers : Icons.layers_clear),
           onPressed: () { setState(() { _accumulate = !_accumulate; }); },
