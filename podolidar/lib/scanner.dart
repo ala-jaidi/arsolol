@@ -60,6 +60,9 @@ class _ScannerPageState extends State<ScannerPage> {
   int _videoRotTurns = 0;
   ScanPhase _phase = ScanPhase.prep;
   final bool _hudMinimal = true;
+  bool _doneTop = false;
+  bool _doneMedial = false;
+  bool _doneLateral = false;
 
   Future<void> _start() async {
     try {
@@ -89,7 +92,7 @@ class _ScannerPageState extends State<ScannerPage> {
         }
       }
     });
-    setState(() { _scanning = true; _fpsAvg = 0; _lastEventMs = 0; _startMs = DateTime.now().millisecondsSinceEpoch; _calibrated = false; _phase = ScanPhase.prep; _accumulate = false; _accum.clear(); _accumC.clear(); _coverage = 0.0; _dimsPrev = null; });
+    setState(() { _scanning = true; _fpsAvg = 0; _lastEventMs = 0; _startMs = DateTime.now().millisecondsSinceEpoch; _calibrated = false; _phase = ScanPhase.prep; _accumulate = false; _accum.clear(); _accumC.clear(); _coverage = 0.0; _dimsPrev = null; _doneTop = false; _doneMedial = false; _doneLateral = false; });
   }
 
   Future<void> _stop() async {
@@ -202,6 +205,7 @@ class _ScannerPageState extends State<ScannerPage> {
         }
         final now = DateTime.now().millisecondsSinceEpoch;
         _coverage = (_accum.length / _targetVox).clamp(0.0, 1.0);
+        _checkZoneMilestones();
         final guide = _guideText();
         if (!_hudMinimal && _scanning && guide != _lastGuide) {
           _lastGuide = guide;
@@ -359,14 +363,24 @@ class _ScannerPageState extends State<ScannerPage> {
                     borderRadius: BorderRadius.circular(14),
                     color: Colors.black54,
                   ),
-                  child: SizedBox(
-                    width: 180,
-                    height: 6,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: LinearProgressIndicator(value: _coverage, backgroundColor: Colors.white24, color: Colors.lightGreenAccent),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    SizedBox(
+                      width: 180,
+                      height: 6,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: LinearProgressIndicator(value: _coverage, backgroundColor: Colors.white24, color: Colors.lightGreenAccent),
+                      ),
                     ),
-                  ),
+                    const SizedBox(width: 10),
+                    Row(children: [
+                      _zoneChip('Dessus', _doneTop),
+                      const SizedBox(width: 6),
+                      _zoneChip('Médial', _doneMedial),
+                      const SizedBox(width: 6),
+                      _zoneChip('Latéral', _doneLateral),
+                    ]),
+                  ]),
                 )
               : AnimatedSwitcher(
                   duration: const Duration(milliseconds: 250),
@@ -595,6 +609,31 @@ class _ScannerPageState extends State<ScannerPage> {
         setState(() { _points = agg; });
       }
     }
+  }
+
+  void _checkZoneMilestones() {
+    if (!_doneTop && _coverage >= 0.30) {
+      _doneTop = true;
+      SystemSound.play(SystemSoundType.click);
+    }
+    if (!_doneMedial && _coverage >= 0.60) {
+      _doneMedial = true;
+      SystemSound.play(SystemSoundType.click);
+    }
+    if (!_doneLateral && _coverage >= 0.90) {
+      _doneLateral = true;
+      SystemSound.play(SystemSoundType.click);
+    }
+  }
+
+  Widget _zoneChip(String label, bool done) {
+    final c = done ? Colors.lightGreen : Colors.grey;
+    final icon = done ? Icons.check : Icons.circle_outlined;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(color: c.withValues(alpha: 0.25), borderRadius: BorderRadius.circular(12), border: Border.all(color: c)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [Icon(icon, size: 14, color: c), const SizedBox(width: 4), Text(label, style: TextStyle(color: c, fontSize: 12))]),
+    );
   }
 
   Future<void> _showResultSheet() async {
