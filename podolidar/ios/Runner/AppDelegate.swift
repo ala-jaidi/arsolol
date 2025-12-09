@@ -28,6 +28,9 @@ import ARKit
   private var groundOrigin: SIMD3<Float32>? = nil
   private var groundNormal: SIMD3<Float32>? = nil
   private var clusterCell: Float32 = 0.01
+  private var groundEpsM: Float32 = 0.006
+  private var autoTuneSegmentation: Bool = true
+  private var segLastTuneTs: CFTimeInterval = 0
 
   override func application(
     _ application: UIApplication,
@@ -65,6 +68,7 @@ import ARKit
             if let v = args["clusterFoot"] as? Bool { self.clusterFoot = v }
             if let v = args["trackingOnlyNormal"] as? Bool { self.trackingOnlyNormal = v }
             if let v = args["clusterCellM"] as? Double { self.clusterCell = Float32(v) }
+            if let v = args["autoTune"] as? Bool { self.autoTuneSegmentation = v }
           }
           result(nil)
         default:
@@ -166,7 +170,9 @@ extension AppDelegate: ARSessionDelegate {
       pointCells.reserveCapacity((width/step)*(height/step))
       let gO = self.groundOrigin
       let gN = self.groundNormal
-      let groundEps: Float32 = 0.006
+      let groundEps: Float32 = self.groundEpsM
+      var zVals: [Float32] = []
+      zVals.reserveCapacity((width/step)*(height/step))
       for y in stride(from: 0, to: height, by: step) {
         for x in stride(from: 0, to: width, by: step) {
           let idx = y * width + x
@@ -188,6 +194,7 @@ extension AppDelegate: ARSessionDelegate {
           positions.append(pointWorld.x)
           positions.append(pointWorld.y)
           positions.append(pointWorld.z)
+          zVals.append(Zc)
           let ix = Int(floorf(pointWorld.x / self.clusterCell))
           let iy = Int(floorf(pointWorld.y / self.clusterCell))
           let iz = Int(floorf(pointWorld.z / self.clusterCell))
@@ -195,6 +202,31 @@ extension AppDelegate: ARSessionDelegate {
         }
       }
       CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
+      if self.autoTuneSegmentation && !zVals.isEmpty {
+        let now = CACurrentMediaTime()
+        if self.segLastTuneTs == 0 || (now - self.segLastTuneTs) > 0.5 {
+          let sorted = zVals.sorted()
+          let mid = sorted.count / 2
+          let distM = sorted[mid]
+          if distM <= 0.25 {
+            self.minDepthM = 0.03
+            self.maxDepthM = 0.50
+            self.clusterCell = 0.007
+            self.groundEpsM = 0.008
+          } else if distM <= 0.35 {
+            self.minDepthM = 0.025
+            self.maxDepthM = 0.55
+            self.clusterCell = 0.009
+            self.groundEpsM = 0.007
+          } else {
+            self.minDepthM = 0.02
+            self.maxDepthM = 0.60
+            self.clusterCell = 0.012
+            self.groundEpsM = 0.006
+          }
+          self.segLastTuneTs = now
+        }
+      }
       if !positions.isEmpty {
         var usePositions = positions
         if self.clusterFoot {
