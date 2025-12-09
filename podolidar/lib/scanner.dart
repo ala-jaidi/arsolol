@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'dart:io';
 import 'dart:convert';
+import 'dart:ui' as ui;
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +10,8 @@ import 'package:vector_math/vector_math_64.dart' as vmath;
 import 'package:path_provider/path_provider.dart';
 import 'point_cloud_view.dart';
 import 'utils/metrics.dart';
+
+enum ScanPhase { prep, scanning, result }
 
 class ScannerPage extends StatefulWidget {
   const ScannerPage({super.key});
@@ -32,17 +35,16 @@ class _ScannerPageState extends State<ScannerPage> {
   bool _accumulate = true;
   final Map<String, bool> _showDim = {
     'BOX': true,
-    'BOX_STRICT': false,
+    'BOX_STRICT': true,
     'GRID': true,
     'FL': true, 'BFL': true, 'OBFL': true, 'FBH': true, 'FBD': true, 'HB': true, 'IH': true,
   };
-  String _quality = 'performance';
-  bool _ultra = false;
+  final String _quality = 'performance';
   final Map<String, vmath.Vector3> _accum = {};
   final Map<String, int> _accumC = {};
-  final double _cell = 0.005;
+  final double _cell = 0.01;
   int _lastMetricsMs = 0;
-  final int _metricsIntervalMs = 200;
+  final int _metricsIntervalMs = 500;
   final int _targetVox = 3000;
   double _coverage = 0.0;
   SevenDims? _dimsPrev;
@@ -55,27 +57,39 @@ class _ScannerPageState extends State<ScannerPage> {
   int _lastTuneMs = 0;
   Timer? _watchdog;
   bool _depthOk = true;
-  bool _restarting = false;
+  int _videoRotTurns = 0;
+  ScanPhase _phase = ScanPhase.prep;
+  final bool _hudMinimal = true;
 
   Future<void> _start() async {
     try {
       final caps = await _method.invokeMethod('getCapabilities');
       if (caps is Map) { _depthOk = (caps['depth'] == true); }
-    } catch (_) {}
+    } catch (_) { _depthOk = false; }
     await _method.invokeMethod('startScan');
+    try {
+      await _method.invokeMethod('setSegmentation', {
+        'minDepthM': 0.02,
+        'maxDepthM': 0.60,
+        'removeGround': true,
+        'clusterFoot': true,
+        'trackingOnlyNormal': true,
+      });
+    } catch (_) {}
     _sub?.cancel();
     _sub = _events.receiveBroadcastStream().listen(_onEvent);
     _videoSub?.cancel();
     _videoSub = _eventsVideo.receiveBroadcastStream().listen(_onVideo);
     _watchdog?.cancel();
-    _watchdog = Timer.periodic(const Duration(milliseconds: 700), (_) {
+    _watchdog = Timer.periodic(const Duration(milliseconds: 1000), (_) {
       final now = DateTime.now().millisecondsSinceEpoch;
-      if (_scanning && !_restarting && (_lastEventMs == 0 || now - _lastEventMs > 900)) {
-        _restarting = true;
-        _method.invokeMethod('stopScan').then((_) => _method.invokeMethod('startScan')).whenComplete(() { _restarting = false; });
+      if (_scanning && (_lastEventMs == 0 || now - _lastEventMs > 2000)) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Tracking faible · Restez immobile')));
+        }
       }
     });
-    setState(() { _scanning = true; _fpsAvg = 0; _lastEventMs = 0; _startMs = DateTime.now().millisecondsSinceEpoch; _calibrated = false; });
+    setState(() { _scanning = true; _fpsAvg = 0; _lastEventMs = 0; _startMs = DateTime.now().millisecondsSinceEpoch; _calibrated = false; _phase = ScanPhase.prep; _accumulate = false; _accum.clear(); _accumC.clear(); _coverage = 0.0; _dimsPrev = null; });
   }
 
   Future<void> _stop() async {
@@ -91,6 +105,9 @@ class _ScannerPageState extends State<ScannerPage> {
 
   void _onEvent(dynamic data) {
     if (data is Uint8List) {
+      if (_phase != ScanPhase.scanning) {
+        return;
+      }
       final nowMs = DateTime.now().millisecondsSinceEpoch;
       if (_lastEventMs != 0) {
         final dt = nowMs - _lastEventMs;
@@ -109,7 +126,9 @@ class _ScannerPageState extends State<ScannerPage> {
         if (count <= 0) return;
       }
       final pts = <vmath.Vector3>[];
-      for (int i = 0; i < count; i++) {
+      int step = 1;
+      if (count > 10000) { step = (count / 10000).ceil(); }
+      for (int i = 0; i < count; i += step) {
         final base = 4 + i * 12;
         final x = bd.getFloat32(base, Endian.little);
         final y = bd.getFloat32(base + 4, Endian.little);
@@ -118,6 +137,40 @@ class _ScannerPageState extends State<ScannerPage> {
       }
       if (_accumulate) {
         for (final p in pts) {
+          if (_dimsPrev != null) {
+            final d = _dimsPrev!;
+            vmath.Vector3 c0 = (d.flB - d.flA).normalized();
+            vmath.Vector3 c1 = (d.fbhB - d.fbhA).normalized();
+            final c2 = vmath.Vector3(
+              c0.y * c1.z - c0.z * c1.y,
+              c0.z * c1.x - c0.x * c1.z,
+              c0.x * c1.y - c0.y * c1.x,
+            ).normalized();
+            c1 = vmath.Vector3(
+              c2.y * c0.z - c2.z * c0.y,
+              c2.z * c0.x - c2.x * c0.z,
+              c2.x * c0.y - c2.y * c0.x,
+            ).normalized();
+            final R = vmath.Matrix3.columns(c0, c1, c2);
+            final anchors = [d.flA, d.flB, d.bflA, d.bflB, d.obflA, d.obflB, d.fbhA, d.fbhB, d.fbdA, d.fbdB, d.hbA, d.hbB, d.ihA, d.ihB];
+            var mean = vmath.Vector3.zero();
+            for (final a in anchors) { mean += a; }
+            mean.scale(1.0 / anchors.length);
+            double minX = double.infinity, maxX = -double.infinity;
+            double minY = double.infinity, maxY = -double.infinity;
+            double minZ = double.infinity, maxZ = -double.infinity;
+            for (final a in anchors) {
+              final r = R.transposed().transform(a - mean);
+              if (r.x < minX) minX = r.x; if (r.x > maxX) maxX = r.x;
+              if (r.y < minY) minY = r.y; if (r.y > maxY) maxY = r.y;
+              if (r.z < minZ) minZ = r.z; if (r.z > maxZ) maxZ = r.z;
+            }
+            final rp = R.transposed().transform(p - mean);
+            const m = 0.03;
+            if (!(rp.x >= minX - m && rp.x <= maxX + m && rp.y >= minY - m && rp.y <= maxY + m && rp.z >= minZ - 0.04 && rp.z <= maxZ + 0.04)) {
+              continue;
+            }
+          }
           final ix = (p.x / _cell).floor();
           final iy = (p.y / _cell).floor();
           final iz = (p.z / _cell).floor();
@@ -137,25 +190,28 @@ class _ScannerPageState extends State<ScannerPage> {
           }
         }
         final agg = _accum.values.toList(growable: false);
-        if (_accum.length > 80000) {
+        if (_accum.length > 12000) {
           var m = vmath.Vector3.zero();
           for (final p in agg) { m += p; }
           if (agg.isNotEmpty) m.scale(1.0 / agg.length);
           final dist = <MapEntry<String, double>>[];
           _accum.forEach((k, p) { dist.add(MapEntry(k, (p - m).length)); });
           dist.sort((a,b)=>b.value.compareTo(a.value));
-          final target = 60000;
+          final target = 10000;
           for (int i = 0; i < dist.length - target; i++) { _accum.remove(dist[i].key); _accumC.remove(dist[i].key); }
         }
         final now = DateTime.now().millisecondsSinceEpoch;
         _coverage = (_accum.length / _targetVox).clamp(0.0, 1.0);
         final guide = _guideText();
-        if (_scanning && guide != _lastGuide) {
+        if (!_hudMinimal && _scanning && guide != _lastGuide) {
           _lastGuide = guide;
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(guide == 'OK' ? 'Couverture OK' : 'Continuez: $guide')));
             SystemSound.play(SystemSoundType.click);
           }
+        }
+        if (_coverage >= _coverageNeeded()) {
+          _onStopPressed();
         }
         if (!_calibrated && _scanning && (nowMs - _startMs) > 1500 && _fpsAvg > 0) {
           final tunedFps = _fpsAvg.clamp(18.0, 28.0);
@@ -210,9 +266,32 @@ class _ScannerPageState extends State<ScannerPage> {
   }
 
   void _onVideo(dynamic data) {
-    if (data is Uint8List) {
-      setState(() { _videoJpeg = data; });
+    Uint8List? bytes;
+    int turnsHint = 0;
+    if (data is Map) {
+      final jpeg = data['jpeg'] ?? data['bytes'];
+      if (jpeg is Uint8List) bytes = jpeg;
+      final t = data['rotationQuarterTurns'] ?? data['turns'] ?? 0;
+      if (t is int) turnsHint = t % 4;
+    } else if (data is Uint8List) {
+      bytes = data;
     }
+    if (bytes == null) return;
+    setState(() { _videoJpeg = bytes; });
+    try {
+      ui.decodeImageFromList(bytes, (img) {
+        if (!mounted) return;
+        int turns = turnsHint;
+        if (turns == 0) {
+          final size = MediaQuery.of(context).size;
+          final isViewPortrait = size.height >= size.width;
+          final isImgLandscape = img.width >= img.height;
+          if (isViewPortrait && isImgLandscape) turns = 1;
+          if (!isViewPortrait && !isImgLandscape) turns = 1;
+        }
+        setState(() { _videoRotTurns = turns; });
+      });
+    } catch (_) {}
   }
 
   @override
@@ -224,67 +303,16 @@ class _ScannerPageState extends State<ScannerPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Scanner Lidar - Podologie'), actions: [
-        IconButton(
-          icon: Icon(_accumulate ? Icons.layers : Icons.layers_clear),
-          onPressed: () { setState(() { _accumulate = !_accumulate; }); },
-        ),
+      appBar: AppBar(title: const Text('Scanner Lidar'), actions: [
         IconButton(
           icon: const Icon(Icons.delete_outline),
           onPressed: () { setState(() { _accum.clear(); _accumC.clear(); _points = const []; _metrics = null; }); },
-        ),
-        IconButton(
-          icon: const Icon(Icons.save_alt),
-          onPressed: _exportJson,
-        ),
-        IconButton(
-          icon: const Icon(Icons.picture_as_pdf),
-          onPressed: _exportPdf,
-        ),
-        IconButton(
-          icon: const Icon(Icons.category),
-          onPressed: _exportObj,
-        ),
-        IconButton(
-          icon: const Icon(Icons.straighten),
-          onPressed: _toggleDims,
-        ),
-        IconButton(
-          icon: const Icon(Icons.speed),
-          onPressed: _toggleQuality,
         ),
       ]),
       body: Stack(children: [
         Column(
           children: [
-            Expanded(child: PointCloudView(points: _points, autoFit: true, dims: _dims, dimsShow: _showDim, backgroundJpeg: _videoJpeg)),
-            Container(
-              padding: const EdgeInsets.all(8),
-              color: Colors.black12,
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    _metricTile('Longueur', _metrics?.lengthCm),
-                    _metricTile('Largeur', _metrics?.widthCm),
-                    _metricTile('Hauteur voûte', _metrics?.archHeightCm),
-                    _metricTile('Angle talon', _metrics?.heelAngleDeg),
-                    _metricTile('Indice voûte', _metrics == null ? null : (_metrics!.archIndex * 100.0)),
-                    _metricTile('Largeur avant-pied', _metrics?.forefootWidthCm),
-                    _metricTile('Courbure voûte', _metrics?.archCurvature),
-                    _metricTile('Ratio voûte/avant-pied', _metrics?.archForefootRatio),
-                    _metricTile('Largeur 25%', _metrics?.w25Cm),
-                    _metricTile('Largeur 50%', _metrics?.w50Cm),
-                    _metricTile('Largeur 75%', _metrics?.w75Cm),
-                    _metricTile('Largeur talon', _metrics?.heelWidthCm),
-                    _metricTile('Chippaux-Smirak %', _metrics?.csiPercent),
-                    _metricTile('Staheli ratio', _metrics?.staheliRatio),
-                    _metricTile('Clarke angle', _metrics?.clarkeAngleDeg),
-                    _metricTile('Volume cm³', _metrics?.volumeCm3),
-                  ],
-                ),
-              ),
-            ),
+            Expanded(child: PointCloudView(points: _points, autoFit: true, dims: _dims, dimsShow: _showDim, backgroundJpeg: _videoJpeg, backgroundRotationQuarterTurns: _videoRotTurns)),
           ],
         ),
         Positioned(
@@ -313,32 +341,70 @@ class _ScannerPageState extends State<ScannerPage> {
           top: 8,
           left: 8,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(12)),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Couverture ${(100*_coverage).toStringAsFixed(0)}% · ${_guideText()}',
-                  style: const TextStyle(color: Colors.white),
-                ),
-                const SizedBox(height: 6),
-                SizedBox(
-                  width: 160,
-                  height: 6,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: LinearProgressIndicator(
-                      value: _coverage,
-                      backgroundColor: Colors.white24,
-                      color: Colors.lightGreenAccent,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(12)),
+            child: Text(
+              _phase == ScanPhase.prep ? 'Préparation' : (_phase == ScanPhase.scanning ? 'Scan' : 'Résultat'),
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+        ),
+        if (_phase == ScanPhase.scanning) Positioned(
+          top: 8,
+          left: 8,
+          child: _hudMinimal
+              ? Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(14),
+                    color: Colors.black54,
+                  ),
+                  child: SizedBox(
+                    width: 180,
+                    height: 6,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(value: _coverage, backgroundColor: Colors.white24, color: Colors.lightGreenAccent),
+                    ),
+                  ),
+                )
+              : AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 250),
+                  child: Container(
+                    key: ValueKey(_guideText()),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      gradient: LinearGradient(colors: [Colors.black87, Colors.black54]),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Builder(builder: (_) {
+                          final z = _zoneVisual(_guideText());
+                          return CircleAvatar(backgroundColor: z.$2, child: Icon(z.$1, color: Colors.white));
+                        }),
+                        const SizedBox(width: 10),
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Couverture ${(100*_coverage).toStringAsFixed(0)}% · ${_guideText()}', style: const TextStyle(color: Colors.white)),
+                            const SizedBox(height: 6),
+                            SizedBox(
+                              width: 180,
+                              height: 6,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(4),
+                                child: LinearProgressIndicator(value: _coverage, backgroundColor: Colors.white24, color: Colors.lightGreenAccent),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
                 ),
-              ],
-            ),
-          ),
         ),
       ]),
       bottomNavigationBar: SafeArea(
@@ -348,17 +414,42 @@ class _ScannerPageState extends State<ScannerPage> {
             children: [
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: _scanning ? null : _start,
+                  onPressed: () async {
+                    if (!_scanning) { await _start(); }
+                    else if (_phase == ScanPhase.prep) {
+                      setState(() {
+                        _accumulate = true;
+                        _phase = ScanPhase.scanning;
+                        _showDim['GRID'] = false;
+                        _showDim['BOX'] = false;
+                        _showDim['BOX_STRICT'] = false;
+                        _showDim['FL'] = false; _showDim['BFL'] = false; _showDim['OBFL'] = false; _showDim['FBH'] = false; _showDim['FBD'] = false; _showDim['HB'] = false; _showDim['IH'] = false;
+                      });
+                    }
+                    else if (_phase == ScanPhase.result) { await _start(); }
+                  },
                   icon: const Icon(Icons.play_arrow),
-                  label: const Text('Démarrer'),
+                  label: Text(!_scanning ? 'Préparer' : (_phase == ScanPhase.prep ? 'Scanner' : 'Recommencer')),
                 ),
               ),
               const SizedBox(width: 12),
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: (_scanning && _coverage >= _coverageNeeded()) ? _onStopPressed : null,
-                  icon: const Icon(Icons.stop),
-                  label: const Text('Arrêter'),
+                  onPressed: (_phase == ScanPhase.scanning && _coverage >= _coverageNeeded()) || _phase == ScanPhase.result ? () async {
+                    if (_phase == ScanPhase.scanning) {
+                      await _onStopPressed();
+                      setState(() {
+                        _phase = ScanPhase.result;
+                        _showDim['GRID'] = true;
+                        _showDim['BOX'] = true; _showDim['BOX_STRICT'] = true;
+                        _showDim['FL'] = true; _showDim['BFL'] = true; _showDim['OBFL'] = true; _showDim['FBH'] = true; _showDim['FBD'] = true; _showDim['HB'] = true; _showDim['IH'] = true;
+                      });
+                      await _showResultSheet();
+                    }
+                    else { await _exportPdf(); }
+                  } : null,
+                  icon: Icon(_phase == ScanPhase.result ? Icons.check : Icons.stop),
+                  label: Text(_phase == ScanPhase.result ? 'Valider' : 'Terminer'),
                 ),
               ),
             ],
@@ -412,6 +503,13 @@ class _ScannerPageState extends State<ScannerPage> {
     return 'OK';
   }
 
+  (IconData, Color) _zoneVisual(String g) {
+    if (g == 'Vue dessus') return (Icons.center_focus_strong, Colors.cyan);
+    if (g == 'Côté médial') return (Icons.keyboard_arrow_left, Colors.orange);
+    if (g == 'Côté latéral') return (Icons.keyboard_arrow_right, Colors.lightBlue);
+    return (Icons.check_circle, Colors.lightGreen);
+  }
+
   double _coverageNeeded() {
     final len = _metrics?.lengthCm ?? 20.0;
     final vol = _metrics?.volumeCm3 ?? 0.0;
@@ -442,7 +540,10 @@ class _ScannerPageState extends State<ScannerPage> {
       return;
     }
     final base = jsonDecode(metricsToJson(_metrics!));
-    if (_dims != null) { base['seven_dimensions'] = sevenDimsToMap(_dims!); }
+    if (_dims != null) {
+      base['seven_dimensions'] = sevenDimsToMap(_dims!);
+      base['seven_dimensions_graph'] = sevenDimsSemanticGraph(_dims!);
+    }
     final jsonStr = jsonEncode(base);
     final dir = await getApplicationDocumentsDirectory();
     final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
@@ -470,60 +571,11 @@ class _ScannerPageState extends State<ScannerPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('PDF enregistré: ${file.path}')));
   }
 
-  Future<void> _exportObj() async {
-    if (_coverage < _coverageNeeded()) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Couverture ${(100*_coverage).toStringAsFixed(0)}% insuffisante · Continuez: ${_guideText()}')));
-      return;
-    }
-    if (_points.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aucun nuage à exporter')));
-      return;
-    }
-    final obj = generateHeightmapObj(_points);
-    if (obj.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Maillage indisponible')));
-      return;
-    }
-    final dir = await getApplicationDocumentsDirectory();
-    final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
-    final file = File('${dir.path}/mesh_$ts.obj');
-    await file.writeAsString(obj);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('OBJ enregistré: ${file.path}')));
-  }
+  
 
-  void _toggleDims() {
-    showModalBottomSheet(context: context, builder: (_) {
-      return StatefulBuilder(builder: (context, setS) {
-        Widget chip(String k) {
-          return FilterChip(
-            selected: _showDim[k] == true,
-            label: Text(k),
-            onSelected: (v) { setS(() { _showDim[k] = v; }); setState(() {}); },
-          );
-        }
-        return Padding(
-          padding: const EdgeInsets.all(12),
-          child: Wrap(spacing: 8, runSpacing: 8, children: [
-            chip('BOX'), chip('BOX_STRICT'), chip('GRID'), chip('FL'), chip('BFL'), chip('OBFL'), chip('FBH'), chip('FBD'), chip('HB'), chip('IH'),
-          ]),
-        );
-      });
-    });
-  }
+  
 
-  void _toggleQuality() async {
-    final modes = ['performance', 'balanced', 'detail', 'ultra'];
-    final idx = modes.indexOf(_quality);
-    final next = modes[(idx + 1) % modes.length];
-    _quality = next;
-    _ultra = next == 'ultra';
-    final q = _qualityDefaults(next);
-    final double fps = q.$1; final int maxPts = q.$2;
-    await _method.invokeMethod('setQuality', {'targetFps': fps, 'maxPoints': maxPts});
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Qualité: $_quality')));
-  }
+  
 
   (double, int) _qualityDefaults(String q) {
     if (q == 'detail' || q == 'ultra') return (18.0, 80000);
@@ -532,13 +584,48 @@ class _ScannerPageState extends State<ScannerPage> {
   }
 
   Future<void> _onStopPressed() async {
-    if (_ultra) {
-      final d = _qualityDefaults('detail');
-      final double fps = d.$1; final int maxPts = d.$2;
-      await _method.invokeMethod('setQuality', {'targetFps': 14.0, 'maxPoints': 120000});
-      await Future.delayed(const Duration(milliseconds: 1500));
-      await _method.invokeMethod('setQuality', {'targetFps': fps, 'maxPoints': maxPts});
-    }
     await _stop();
+    final agg = _accum.values.toList(growable: false);
+    if (agg.isNotEmpty) {
+      try {
+        final m = computeMetrics(agg);
+        final d = computeSevenDimensions(agg);
+        setState(() { _metrics = m; _dims = d; _points = agg; });
+      } catch (_) {
+        setState(() { _points = agg; });
+      }
+    }
+  }
+
+  Future<void> _showResultSheet() async {
+    if (!mounted) return;
+    showModalBottomSheet(context: context, isScrollControlled: true, builder: (_) {
+      return SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Résultat du scan', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              Wrap(spacing: 16, runSpacing: 12, children: [
+                _metricTile('Longueur', _metrics?.lengthCm),
+                _metricTile('Largeur', _metrics?.widthCm),
+                _metricTile('Hauteur voûte', _metrics?.archHeightCm),
+                _metricTile('Largeur avant-pied', _metrics?.forefootWidthCm),
+                _metricTile('Largeur talon', _metrics?.heelWidthCm),
+              ]),
+              const SizedBox(height: 16),
+              Row(children: [
+                Expanded(child: ElevatedButton.icon(onPressed: _exportPdf, icon: const Icon(Icons.picture_as_pdf), label: const Text('Exporter PDF'))),
+                const SizedBox(width: 12),
+                Expanded(child: ElevatedButton.icon(onPressed: _exportJson, icon: const Icon(Icons.save_alt), label: const Text('Exporter JSON'))),
+              ]),
+            ],
+          ),
+        ),
+      );
+    });
   }
 }

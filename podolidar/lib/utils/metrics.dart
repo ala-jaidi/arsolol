@@ -558,6 +558,36 @@ String sevenDimsToJson(SevenDims d) {
   return jsonEncode(sevenDimsToMap(d));
 }
 
+Map<String, dynamic> sevenDimsSemanticGraph(SevenDims d) {
+  List<double> p(vmath.Vector3 v) => [v.x, v.y, v.z];
+  final V = {
+    'FL_A': p(d.flA), 'FL_B': p(d.flB),
+    'BFL_A': p(d.bflA), 'BFL_B': p(d.bflB),
+    'OBFL_A': p(d.obflA), 'OBFL_B': p(d.obflB),
+    'FBH_A': p(d.fbhA), 'FBH_B': p(d.fbhB),
+    'FBD_A': p(d.fbdA), 'FBD_B': p(d.fbdB),
+    'HB_A': p(d.hbA), 'HB_B': p(d.hbB),
+    'IH_A': p(d.ihA), 'IH_B': p(d.ihB),
+  };
+  final List<List<String>> E = [];
+  void edge(String a, String b) { E.add([a, b]); }
+  edge('FL_A', 'FL_B');
+  edge('BFL_A', 'BFL_B');
+  edge('OBFL_A', 'OBFL_B');
+  edge('FBH_A', 'FBH_B');
+  edge('FBD_A', 'FBD_B');
+  edge('HB_A', 'HB_B');
+  edge('IH_A', 'IH_B');
+  edge('FL_A', 'BFL_A');
+  edge('FL_A', 'OBFL_A');
+  edge('BFL_B', 'FBD_A');
+  edge('OBFL_B', 'FBD_B');
+  edge('FBH_A', 'BFL_B');
+  edge('FBH_B', 'OBFL_B');
+  edge('IH_B', 'FL_B');
+  return {'V': V, 'E': E};
+}
+
 Future<Uint8List> generatePdfReportWithDims(Metrics m, SevenDims? d) async {
   final pdf = pw.Document();
   pdf.addPage(

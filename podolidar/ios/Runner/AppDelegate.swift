@@ -18,6 +18,8 @@ import ARKit
   private var maxPoints: Int = 50000
   private var pixelStep: Int = 4
   private var lastFrameTs: CFTimeInterval = 0
+  private let processingQueue = DispatchQueue(label: "com.podo.lidar.proc", qos: .userInitiated)
+  private var processing = false
 
   override func application(
     _ application: UIApplication,
@@ -111,90 +113,86 @@ extension AppDelegate: ARSessionDelegate {
   }
 
   func session(_ session: ARSession, didUpdate frame: ARFrame) {
-    guard streaming, let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth else { return }
+    guard streaming, !processing, let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth else { return }
+    processing = true
     let depthMap = depthData.depthMap
-    let width = CVPixelBufferGetWidth(depthMap)
-    let height = CVPixelBufferGetHeight(depthMap)
-
-    CVPixelBufferLockBaseAddress(depthMap, .readOnly)
-    defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
-
-    let baseAddress = CVPixelBufferGetBaseAddress(depthMap)!
-    let floatBuffer = baseAddress.assumingMemoryBound(to: Float32.self)
-
     let camera = frame.camera
     let intrinsics = camera.intrinsics
-    let resolution = camera.imageResolution
     let transform = camera.transform
-
-    var step = pixelStep
-    let maxPoints = self.maxPoints
-    let total = width * height
-    while (total / (step * step)) > maxPoints { step += 1 }
-    var positions: [Float32] = []
-    positions.reserveCapacity((width/step)*(height/step)*3)
-
-    for y in stride(from: 0, to: height, by: step) {
-      for x in stride(from: 0, to: width, by: step) {
-        let idx = y * width + x
-        let z = floatBuffer[idx]
-        if !z.isFinite || z <= 0 { continue }
-        let px = Float32(x)
-        let py = Float32(y)
-        let fx = Float32(intrinsics.columns.0.x)
-        let fy = Float32(intrinsics.columns.1.y)
-        let cx = Float32(intrinsics.columns.2.x)
-        let cy = Float32(intrinsics.columns.2.y)
-        let Xc = (px - cx) * z / fx
-        let Yc = (py - cy) * z / fy
-        let Zc = z
-        let pointCam = SIMD4<Float32>(Xc, Yc, Zc, 1)
-        let pointWorld = transform * pointCam
-        positions.append(pointWorld.x)
-        positions.append(pointWorld.y)
-        positions.append(pointWorld.z)
+    let capturedImage = frame.capturedImage
+    processingQueue.async { [weak self] in
+      guard let self = self else { return }
+      let width = CVPixelBufferGetWidth(depthMap)
+      let height = CVPixelBufferGetHeight(depthMap)
+      CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+      let baseAddress = CVPixelBufferGetBaseAddress(depthMap)!
+      let floatBuffer = baseAddress.assumingMemoryBound(to: Float32.self)
+      var step = self.pixelStep
+      let maxPoints = self.maxPoints
+      let total = width * height
+      while (total / (step * step)) > maxPoints { step += 1 }
+      var positions: [Float32] = []
+      positions.reserveCapacity((width/step)*(height/step)*3)
+      let fx = Float32(intrinsics.columns.0.x)
+      let fy = Float32(intrinsics.columns.1.y)
+      let cx = Float32(intrinsics.columns.2.x)
+      let cy = Float32(intrinsics.columns.2.y)
+      for y in stride(from: 0, to: height, by: step) {
+        for x in stride(from: 0, to: width, by: step) {
+          let idx = y * width + x
+          let z = floatBuffer[idx]
+          if !z.isFinite || z <= 0 { continue }
+          let px = Float32(x)
+          let py = Float32(y)
+          let Xc = (px - cx) * z / fx
+          let Yc = (py - cy) * z / fy
+          let Zc = z
+          let pointCam = SIMD4<Float32>(Xc, Yc, Zc, 1)
+          let pointWorld = transform * pointCam
+          positions.append(pointWorld.x)
+          positions.append(pointWorld.y)
+          positions.append(pointWorld.z)
+        }
       }
-    }
-
-    if positions.isEmpty { return }
-    var data = Data(capacity: 4 + positions.count * 4)
-    var count = Int32(positions.count / 3)
-    withUnsafeBytes(of: &count) { data.append(contentsOf: $0) }
-    positions.withUnsafeBytes { raw in
-      data.append(raw.bindMemory(to: UInt8.self))
-    }
-    eventSink?(FlutterStandardTypedData(bytes: data))
-
-    // Video preview at ~10 FPS, downscaled
-    if let sink = videoSink {
-      let now = CACurrentMediaTime()
-      let videoInterval = max(0.05, 1.0 / max(10.0, targetFps / 2.0))
-      if lastVideoTime == 0 || (now - lastVideoTime) > videoInterval {
-        lastVideoTime = now
-        let ci = CIImage(cvPixelBuffer: frame.capturedImage)
-        let context = CIContext(options: nil)
-        let rect = ci.extent
-        let scale: CGFloat = 640.0 / rect.width
-        let targetW = Int(rect.width * scale)
-        let targetH = Int(rect.height * scale)
-        if let cg = context.createCGImage(ci, from: rect) {
-          let uiImage = UIImage(cgImage: cg)
-          UIGraphicsBeginImageContext(CGSize(width: targetW, height: targetH))
-          uiImage.draw(in: CGRect(x: 0, y: 0, width: targetW, height: targetH))
-          let scaled = UIGraphicsGetImageFromCurrentImageContext()
-          UIGraphicsEndImageContext()
-          if let img = scaled, let bytes = img.jpegData(compressionQuality: 0.6) {
-            sink(FlutterStandardTypedData(bytes: bytes))
+      CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
+      if !positions.isEmpty {
+        var data = Data(capacity: 4 + positions.count * 4)
+        var count = Int32(positions.count / 3)
+        withUnsafeBytes(of: &count) { data.append(contentsOf: $0) }
+        positions.withUnsafeBytes { raw in
+          data.append(raw.bindMemory(to: UInt8.self))
+        }
+        self.eventSink?(FlutterStandardTypedData(bytes: data))
+      }
+      let t = CACurrentMediaTime()
+      let dt = t - self.lastFrameTs
+      self.lastFrameTs = t
+      let target = 1.0 / self.targetFps
+      if dt > target { self.pixelStep = min(step + 1, 16) } else { self.pixelStep = max(step - 1, 1) }
+      if let sink = self.videoSink {
+        let now = CACurrentMediaTime()
+        let videoInterval = max(0.05, 1.0 / max(10.0, self.targetFps / 2.0))
+        if self.lastVideoTime == 0 || (now - self.lastVideoTime) > videoInterval {
+          self.lastVideoTime = now
+          let ci = CIImage(cvPixelBuffer: capturedImage)
+          let context = CIContext(options: nil)
+          let rect = ci.extent
+          let scale: CGFloat = 640.0 / rect.width
+          let targetW = Int(rect.width * scale)
+          let targetH = Int(rect.height * scale)
+          if let cg = context.createCGImage(ci, from: rect) {
+            let uiImage = UIImage(cgImage: cg)
+            UIGraphicsBeginImageContext(CGSize(width: targetW, height: targetH))
+            uiImage.draw(in: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+            let scaled = UIGraphicsGetImageFromCurrentImageContext()
+            UIGraphicsEndImageContext()
+            if let img = scaled, let bytes = img.jpegData(compressionQuality: 0.6) {
+              sink(FlutterStandardTypedData(bytes: bytes))
+            }
           }
         }
       }
+      self.processing = false
     }
-
-    // Adaptive step targeting FPS
-    let t = CACurrentMediaTime()
-    let dt = t - lastFrameTs
-    lastFrameTs = t
-    let target = 1.0 / targetFps
-    if dt > target { pixelStep = min(step + 1, 16) } else { pixelStep = max(step - 1, 1) }
   }
 }

@@ -10,7 +10,8 @@ class PointCloudView extends StatefulWidget {
   final SevenDims? dims;
   final Map<String, bool>? dimsShow;
   final Uint8List? backgroundJpeg;
-  const PointCloudView({super.key, required this.points, this.autoFit = true, this.dims, this.dimsShow, this.backgroundJpeg});
+  final int backgroundRotationQuarterTurns;
+  const PointCloudView({super.key, required this.points, this.autoFit = true, this.dims, this.dimsShow, this.backgroundJpeg, this.backgroundRotationQuarterTurns = 0});
 
   @override
   State<PointCloudView> createState() => _PointCloudViewState();
@@ -48,7 +49,10 @@ class _PointCloudViewState extends State<PointCloudView> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          if (widget.backgroundJpeg != null) Image.memory(widget.backgroundJpeg!, fit: BoxFit.cover, gaplessPlayback: true),
+          if (widget.backgroundJpeg != null) RotatedBox(
+            quarterTurns: widget.backgroundRotationQuarterTurns,
+            child: Image.memory(widget.backgroundJpeg!, fit: BoxFit.cover, gaplessPlayback: true),
+          ),
           CustomPaint(
             painter: _PointPainter(
               points: widget.points,
@@ -139,15 +143,24 @@ class _PointPainter extends CustomPainter {
       ..scale(zoom * 120.0, -zoom * 120.0, 1)
       ..multiply(_rotation());
 
+    final bucketCount = 8;
+    final buckets = List.generate(bucketCount, (_) => <ui.Offset>[]);
+    final colors = List.generate(bucketCount, (i) {
+      final tt = i / (bucketCount - 1);
+      return Color.lerp(Colors.blueAccent, Colors.orangeAccent, tt)!;
+    });
     for (final p in points) {
       final v = vmath.Vector3.copy(p);
       v.sub(center);
       final projected = view.transform3(v);
-      // Color by height
       final t = ((p.z - minZ) / ((maxZ - minZ).abs() + 1e-9)).clamp(0.0, 1.0);
-      final col = Color.lerp(Colors.blueAccent, Colors.orangeAccent, t)!;
-      final paint = base..color = col;
-      canvas.drawPoints(ui.PointMode.points, [ui.Offset(projected.x, projected.y)], paint);
+      final bi = (t * (bucketCount - 1)).round().clamp(0, bucketCount - 1);
+      buckets[bi].add(ui.Offset(projected.x, projected.y));
+    }
+    for (int i = 0; i < bucketCount; i++) {
+      if (buckets[i].isEmpty) continue;
+      final paint = base..color = colors[i];
+      canvas.drawPoints(ui.PointMode.points, buckets[i], paint);
     }
 
     _drawAxes(canvas, size, view);
