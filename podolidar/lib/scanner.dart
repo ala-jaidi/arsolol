@@ -307,18 +307,29 @@ class _ScannerPageState extends State<ScannerPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Scanner Lidar'), actions: [
-        IconButton(
-          icon: const Icon(Icons.delete_outline),
-          onPressed: () { setState(() { _accum.clear(); _accumC.clear(); _points = const []; _metrics = null; }); },
-        ),
-      ]),
+      extendBodyBehindAppBar: true,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        title: const Text('Scanner LiDAR'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.delete_outline),
+            onPressed: () { setState(() { _accum.clear(); _accumC.clear(); _points = const []; _metrics = null; }); },
+          ),
+          IconButton(
+            icon: const Icon(Icons.tune),
+            onPressed: _showSettingsSheet,
+          ),
+        ],
+      ),
       body: Stack(children: [
         Column(
           children: [
-            Expanded(child: PointCloudView(points: _points, autoFit: true, dims: _dims, dimsShow: _showDim, backgroundJpeg: _videoJpeg, backgroundRotationQuarterTurns: _videoRotTurns)),
+            Expanded(child: PointCloudView(points: _points, autoFit: true, dims: _dims, dimsShow: _showDim, backgroundJpeg: _videoJpeg, backgroundRotationQuarterTurns: _videoRotTurns, coverage: _coverage)),
           ],
         ),
+        
         Positioned(
           top: 8,
           right: 8,
@@ -344,14 +355,21 @@ class _ScannerPageState extends State<ScannerPage> {
         Positioned(
           top: 8,
           left: 8,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(12)),
-            child: Text(
-              _phase == ScanPhase.prep ? 'Préparation' : (_phase == ScanPhase.scanning ? 'Scan' : 'Résultat'),
-              style: const TextStyle(color: Colors.white),
-            ),
-          ),
+          child: Builder(builder: (ctx) {
+            final size = MediaQuery.of(ctx).size;
+            final isPortrait = size.height >= size.width;
+            if (isPortrait) {
+              return Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(12)),
+                child: Text(
+                  _phase == ScanPhase.prep ? 'Préparation' : (_phase == ScanPhase.scanning ? 'Scan' : 'Résultat'),
+                  style: const TextStyle(color: Colors.white),
+                ),
+              );
+            }
+            return _miniStepper();
+          }),
         ),
         if (_phase == ScanPhase.scanning) Positioned(
           top: 8,
@@ -384,38 +402,59 @@ class _ScannerPageState extends State<ScannerPage> {
                 )
               : AnimatedSwitcher(
                   duration: const Duration(milliseconds: 250),
-                  child: Container(
-                    key: ValueKey(_guideText()),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(14),
-                      gradient: LinearGradient(colors: [Colors.black87, Colors.black54]),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Builder(builder: (_) {
-                          final z = _zoneVisual(_guideText());
-                          return CircleAvatar(backgroundColor: z.$2, child: Icon(z.$1, color: Colors.white));
-                        }),
-                        const SizedBox(width: 10),
-                        Column(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(14),
+                    child: BackdropFilter(
+                      filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+                      child: Container(
+                        key: ValueKey(_guideText()),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(14),
+                          color: Colors.black38,
+                        ),
+                        child: Row(
                           mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('Couverture ${(100*_coverage).toStringAsFixed(0)}% · ${_guideText()}', style: const TextStyle(color: Colors.white)),
-                            const SizedBox(height: 6),
                             SizedBox(
-                              width: 180,
-                              height: 6,
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(4),
-                                child: LinearProgressIndicator(value: _coverage, backgroundColor: Colors.white24, color: Colors.lightGreenAccent),
-                              ),
+                              width: 64,
+                              height: 64,
+                              child: Stack(alignment: Alignment.center, children: [
+                                CircularProgressIndicator(
+                                  value: _coverage,
+                                  strokeWidth: 6,
+                                  backgroundColor: Colors.white12,
+                                  valueColor: const AlwaysStoppedAnimation<Color>(Colors.lightGreenAccent),
+                                ),
+                                Text('${(100*_coverage).toStringAsFixed(0)}%', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                              ]),
+                            ),
+                            const SizedBox(width: 12),
+                            Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Builder(builder: (_) {
+                                  final z = _zoneVisual(_guideText());
+                                  return Row(mainAxisSize: MainAxisSize.min, children: [
+                                    CircleAvatar(backgroundColor: z.$2, child: Icon(z.$1, color: Colors.white)),
+                                    const SizedBox(width: 8),
+                                    Text(_guideText(), style: const TextStyle(color: Colors.white)),
+                                  ]);
+                                }),
+                                const SizedBox(height: 8),
+                                Row(children: [
+                                  _zoneChip('Dessus', _doneTop),
+                                  const SizedBox(width: 6),
+                                  _zoneChip('Médial', _doneMedial),
+                                  const SizedBox(width: 6),
+                                  _zoneChip('Latéral', _doneLateral),
+                                ]),
+                              ],
                             ),
                           ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
@@ -428,41 +467,47 @@ class _ScannerPageState extends State<ScannerPage> {
             children: [
               Expanded(
                 child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(shape: const StadiumBorder(), padding: const EdgeInsets.symmetric(vertical: 14)),
                   onPressed: () async {
-                    if (!_scanning) { await _start(); }
+                    if (!_scanning) { HapticFeedback.selectionClick(); await _start(); }
                     else if (_phase == ScanPhase.prep) {
+                      HapticFeedback.selectionClick();
                       setState(() {
                         _accumulate = true;
                         _phase = ScanPhase.scanning;
                         _showDim['GRID'] = false;
                         _showDim['BOX'] = false;
                         _showDim['BOX_STRICT'] = false;
+                        _showDim['FOOT_GRID'] = true;
                         _showDim['FL'] = false; _showDim['BFL'] = false; _showDim['OBFL'] = false; _showDim['FBH'] = false; _showDim['FBD'] = false; _showDim['HB'] = false; _showDim['IH'] = false;
                       });
                     }
-                    else if (_phase == ScanPhase.result) { await _start(); }
+                    else if (_phase == ScanPhase.result) { HapticFeedback.selectionClick(); await _start(); }
                   },
-                  icon: const Icon(Icons.play_arrow),
+                  icon: Icon(!_scanning ? Icons.rocket_launch : (_phase == ScanPhase.prep ? Icons.radar : Icons.refresh)),
                   label: Text(!_scanning ? 'Préparer' : (_phase == ScanPhase.prep ? 'Scanner' : 'Recommencer')),
                 ),
               ),
               const SizedBox(width: 12),
               Expanded(
                 child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(shape: const StadiumBorder(), padding: const EdgeInsets.symmetric(vertical: 14)),
                   onPressed: (_phase == ScanPhase.scanning && _coverage >= _coverageNeeded()) || _phase == ScanPhase.result ? () async {
+                    HapticFeedback.selectionClick();
                     if (_phase == ScanPhase.scanning) {
                       await _onStopPressed();
                       setState(() {
                         _phase = ScanPhase.result;
                         _showDim['GRID'] = true;
                         _showDim['BOX'] = true; _showDim['BOX_STRICT'] = true;
+                        _showDim['FOOT_GRID'] = false;
                         _showDim['FL'] = true; _showDim['BFL'] = true; _showDim['OBFL'] = true; _showDim['FBH'] = true; _showDim['FBD'] = true; _showDim['HB'] = true; _showDim['IH'] = true;
                       });
                       await _showResultSheet();
                     }
                     else { await _exportPdf(); }
                   } : null,
-                  icon: Icon(_phase == ScanPhase.result ? Icons.check : Icons.stop),
+                  icon: Icon(_phase == ScanPhase.result ? Icons.check_circle : Icons.stop_circle_outlined),
                   label: Text(_phase == ScanPhase.result ? 'Valider' : 'Terminer'),
                 ),
               ),
@@ -471,6 +516,108 @@ class _ScannerPageState extends State<ScannerPage> {
         ),
       ),
     );
+  }
+
+  Widget _miniStepper() {
+    final scheme = Theme.of(context).colorScheme;
+    bool prepA = _phase == ScanPhase.prep;
+    bool scanA = _phase == ScanPhase.scanning;
+    bool resA = _phase == ScanPhase.result;
+    bool prepDone = scanA || resA;
+    bool scanDone = resA;
+    Widget dot(Color c, IconData i, bool active) {
+      return AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        width: 28,
+        height: 28,
+        decoration: BoxDecoration(
+          color: active ? c : Colors.white24,
+          shape: BoxShape.circle,
+          boxShadow: active ? [BoxShadow(color: c.withValues(alpha: 0.40), blurRadius: 12, spreadRadius: 1)] : [],
+        ),
+        child: Icon(i, size: 16, color: Colors.white),
+      );
+    }
+    Widget seg(bool filled) {
+      return AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        width: 80,
+        height: 4,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(2),
+          gradient: filled ? LinearGradient(colors: [scheme.primary, scheme.secondary]) : const LinearGradient(colors: [Colors.white24, Colors.white24]),
+          boxShadow: filled ? [BoxShadow(color: scheme.primary.withValues(alpha: 0.35), blurRadius: 10, spreadRadius: 1)] : [],
+        ),
+      );
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 250),
+          child: Container(
+            key: ValueKey(_phase),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(14)),
+            child: Row(children: [
+              dot(scheme.secondary, Icons.build, prepA || prepDone),
+              const SizedBox(width: 6),
+              seg(prepDone),
+              const SizedBox(width: 6),
+              dot(scheme.primary, Icons.radar, scanA || scanDone),
+              const SizedBox(width: 6),
+              seg(scanDone),
+              const SizedBox(width: 6),
+              dot(Colors.lightGreen, Icons.check, resA),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showSettingsSheet() async {
+    if (!mounted) return;
+    String quality = 'balanced';
+    bool footGrid = _showDim['FOOT_GRID'] == true;
+    bool groundGrid = _showDim['GRID'] != false;
+    bool boxStrict = _showDim['BOX_STRICT'] == true;
+    await showModalBottomSheet(context: context, isScrollControlled: true, builder: (_) {
+      return SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Réglages', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              Row(children: [
+                const Text('Qualité'),
+                const SizedBox(width: 12),
+                DropdownButton<String>(value: quality, items: const [
+                  DropdownMenuItem(value: 'performance', child: Text('Performance')),
+                  DropdownMenuItem(value: 'balanced', child: Text('Équilibré')),
+                  DropdownMenuItem(value: 'detail', child: Text('Détail')),
+                ], onChanged: (v) async {
+                  if (v == null) return;
+                  quality = v;
+                  final q = _qualityDefaults(quality);
+                  await _method.invokeMethod('setQuality', {'targetFps': q.$1, 'maxPoints': q.$2});
+                }),
+              ]),
+              const SizedBox(height: 8),
+              SwitchListTile(value: footGrid, title: const Text('Grille pied'), onChanged: (v) { setState(() { _showDim['FOOT_GRID'] = v; }); footGrid = v; }),
+              SwitchListTile(value: groundGrid, title: const Text('Grille sol'), onChanged: (v) { setState(() { _showDim['GRID'] = v; }); groundGrid = v; }),
+              SwitchListTile(value: boxStrict, title: const Text('Boîte stricte'), onChanged: (v) { setState(() { _showDim['BOX_STRICT'] = v; _showDim['BOX'] = true; }); boxStrict = v; }),
+              const SizedBox(height: 8),
+              ElevatedButton.icon(onPressed: () { Navigator.pop(context); }, icon: const Icon(Icons.check), label: const Text('Fermer')),
+            ],
+          ),
+        ),
+      );
+    });
   }
 
   SevenDims? _smoothDims(SevenDims? cur, SevenDims? prev) {
@@ -668,3 +815,4 @@ class _ScannerPageState extends State<ScannerPage> {
     });
   }
 }
+  

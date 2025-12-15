@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'dart:ui' as ui;
 import 'dart:typed_data';
 import 'package:vector_math/vector_math_64.dart' as vmath;
@@ -11,13 +12,14 @@ class PointCloudView extends StatefulWidget {
   final Map<String, bool>? dimsShow;
   final Uint8List? backgroundJpeg;
   final int backgroundRotationQuarterTurns;
-  const PointCloudView({super.key, required this.points, this.autoFit = true, this.dims, this.dimsShow, this.backgroundJpeg, this.backgroundRotationQuarterTurns = 0});
+  final double coverage;
+  const PointCloudView({super.key, required this.points, this.autoFit = true, this.dims, this.dimsShow, this.backgroundJpeg, this.backgroundRotationQuarterTurns = 0, this.coverage = 0.0});
 
   @override
   State<PointCloudView> createState() => _PointCloudViewState();
 }
 
-class _PointCloudViewState extends State<PointCloudView> {
+class _PointCloudViewState extends State<PointCloudView> with SingleTickerProviderStateMixin {
   double _yaw = 0;
   double _pitch = 0;
   double _zoom = 1.0;
@@ -25,6 +27,17 @@ class _PointCloudViewState extends State<PointCloudView> {
   double _fitZoom = 1.0;
   double _minZ = 0.0;
   double _maxZ = 0.0;
+  ui.FragmentProgram? _neonProgram;
+  late final Ticker _ticker;
+  double _time = 0.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Ticker((elapsed) { setState(() { _time = elapsed.inMilliseconds / 1000.0; }); });
+    _ticker.start();
+    ui.FragmentProgram.fromAsset('shaders/neon_grid.frag').then((p) { setState(() { _neonProgram = p; }); });
+  }
 
   @override
   void didUpdateWidget(covariant PointCloudView oldWidget) {
@@ -34,6 +47,12 @@ class _PointCloudViewState extends State<PointCloudView> {
       final bb = _bbox(widget.points);
       _minZ = bb[4]; _maxZ = bb[5];
     }
+  }
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    super.dispose();
   }
 
   @override
@@ -64,6 +83,9 @@ class _PointCloudViewState extends State<PointCloudView> {
               maxZ: _maxZ,
               dims: widget.dims,
               dimsShow: widget.dimsShow,
+              neonProgram: _neonProgram,
+              time: _time,
+              pulse: widget.coverage,
             ),
             child: const SizedBox.expand(),
           ),
@@ -120,6 +142,9 @@ class _PointPainter extends CustomPainter {
   final double maxZ;
   final SevenDims? dims;
   final Map<String, bool>? dimsShow;
+  final ui.FragmentProgram? neonProgram;
+  final double time;
+  final double pulse;
   _PointPainter({
     required this.points,
     required this.yaw,
@@ -130,6 +155,9 @@ class _PointPainter extends CustomPainter {
     required this.maxZ,
     this.dims,
     this.dimsShow,
+    this.neonProgram,
+    required this.time,
+    required this.pulse,
   });
 
   @override
@@ -166,6 +194,7 @@ class _PointPainter extends CustomPainter {
     _drawAxes(canvas, size, view);
     _drawGround(canvas, size, view);
     _drawBox(canvas, size, view);
+    _drawFootGrid(canvas, size, view);
     _drawDims(canvas, size, view);
   }
 
@@ -298,6 +327,114 @@ class _PointPainter extends CustomPainter {
     tp.text = const TextSpan(style: TextStyle(color: Colors.amber, fontSize: 12), text: 'Z'); tp.layout(); tp.paint(canvas, ui.Offset(z.x, z.y));
   }
 
+  void _drawFootGrid(Canvas canvas, Size size, vmath.Matrix4 view) {
+    final d = dims;
+    if (d == null) return;
+    final show = dimsShow ?? const {'FOOT_GRID': false};
+    if (show['FOOT_GRID'] != true) return;
+
+    vmath.Matrix3 R;
+    // Build an oriented frame from dimensions (forefoot length and breadth axes)
+    var c0 = (d.flB - d.flA).normalized();
+    var c1 = (d.fbhB - d.fbhA).normalized();
+    if (!c0.x.isFinite || !c0.y.isFinite || !c0.z.isFinite) return;
+    if (!c1.x.isFinite || !c1.y.isFinite || !c1.z.isFinite) return;
+    final c2 = vmath.Vector3(
+      c0.y * c1.z - c0.z * c1.y,
+      c0.z * c1.x - c0.x * c1.z,
+      c0.x * c1.y - c0.y * c1.x,
+    ).normalized();
+    if (c2.length2 < 1e-9) return;
+    c1 = vmath.Vector3(
+      c2.y * c0.z - c2.z * c0.y,
+      c2.z * c0.x - c2.x * c0.z,
+      c2.x * c0.y - c2.y * c0.x,
+    ).normalized();
+    R = vmath.Matrix3.columns(c0, c1, c2);
+
+    final gridStepM = 0.02;
+    final thresholdM = 0.004;
+
+    final Map<int, List<_Node>> uLines = <int, List<_Node>>{};
+    final Map<int, List<_Node>> vLines = <int, List<_Node>>{};
+
+    int step = 1;
+    if (points.length > 60000) step = (points.length / 60000).ceil();
+    for (int i = 0; i < points.length; i += step) {
+      final p = points[i];
+      final r = R.transposed().transform(p - center);
+      final uIdx = (r.x / gridStepM).round();
+      final vIdx = (r.y / gridStepM).round();
+      final nearestU = uIdx * gridStepM;
+      final nearestV = vIdx * gridStepM;
+      final nearU = (r.x - nearestU).abs() <= thresholdM;
+      final nearV = (r.y - nearestV).abs() <= thresholdM;
+      final proj = view.transform3(vmath.Vector3.copy(p)..sub(center));
+      if (nearU) {
+        (uLines[uIdx] ??= []).add(_Node(ui.Offset(proj.x, proj.y), r.y));
+      }
+      if (nearV) {
+        (vLines[vIdx] ??= []).add(_Node(ui.Offset(proj.x, proj.y), r.x));
+      }
+    }
+
+    void drawPolyline(List<_Node> nodes) {
+      nodes.sort((a, b) => a.k.compareTo(b.k));
+      final path = Path();
+      bool started = false;
+      ui.Offset? last;
+      for (final n in nodes) {
+        if (!started) {
+          path.moveTo(n.p.dx, n.p.dy);
+          started = true;
+        } else {
+          final dist = (n.p - (last ?? n.p)).distance;
+          if (dist > 28) {
+            path.moveTo(n.p.dx, n.p.dy);
+          } else {
+            path.lineTo(n.p.dx, n.p.dy);
+          }
+        }
+        last = n.p;
+      }
+      if (started) {
+        final glow = Paint()
+          ..color = const Color.fromRGBO(0, 153, 255, 0.50)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 5
+          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 6);
+        Paint line;
+        if (neonProgram != null) {
+          final fs = neonProgram!.fragmentShader();
+          fs.setFloat(0, time);
+          fs.setFloat(1, size.width);
+          fs.setFloat(2, size.height);
+          fs.setFloat(3, 0.25); fs.setFloat(4, 0.88); fs.setFloat(5, 0.82); fs.setFloat(6, 1.0);
+          fs.setFloat(7, 0.0); fs.setFloat(8, 0.60); fs.setFloat(9, 1.0); fs.setFloat(10, 1.0);
+          fs.setFloat(11, pulse);
+          line = Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2.2
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..shader = fs;
+        } else {
+          line = Paint()
+            ..color = const Color.fromRGBO(153, 255, 255, 1)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2.2
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round;
+        }
+        canvas.drawPath(path, glow);
+        canvas.drawPath(path, line);
+      }
+    }
+
+    for (final e in uLines.entries) { if (e.value.length > 6) drawPolyline(e.value); }
+    for (final e in vLines.entries) { if (e.value.length > 6) drawPolyline(e.value); }
+  }
+
   void _drawDims(Canvas canvas, Size size, vmath.Matrix4 view) {
     final d = dims;
     if (d == null) return;
@@ -337,4 +474,11 @@ class _PointPainter extends CustomPainter {
         oldDelegate.zoom != zoom ||
         oldDelegate.center != center;
   }
+
+}
+
+class _Node {
+  final ui.Offset p;
+  final double k;
+  _Node(this.p, this.k);
 }
